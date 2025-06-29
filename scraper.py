@@ -1,14 +1,14 @@
 # =======================================================================================
 #               AMAZON SELLER CENTRAL SCRAPER (CI/CD / COMMAND-LINE VERSION)
 # =======================================================================================
-# This version of the script is optimized for automated, non-interactive environments
-# like GitHub Actions. It removes the web server and scheduler, and instead runs the
-# core data collection and submission process once from start to finish, then exits.
+# This version is optimized for automated environments like GitHub Actions.
+# It includes robust login handling for anti-bot pages.
+# It runs the core data collection and submission process once, then exits.
 #
 # To run:
 # 1. Ensure `config.json` and `urls.csv` are in the same directory.
 # 2. Ensure all dependencies from requirements.txt are installed.
-# 3. Execute from your terminal: python your_script_name.py
+# 3. Execute from your terminal: python scraper.py
 # =======================================================================================
 
 import logging
@@ -57,19 +57,17 @@ DEBUG_MODE      = config.get('debug', False)
 FORM_URL        = config['form_url']
 LOGIN_URL       = config['login_url']
 
-# Concurrency settings are simplified for single-run execution
-INITIAL_CONCURRENCY = config.get('initial_concurrency', 15)
+INITIAL_CONCURRENCY = config.get('initial_concurrency', 8)
 NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 4)
 
-SCHEDULE_FILE   = 'schedules.json'
 LOG_FILE        = os.path.join('output', 'submissions.log')
 JSON_LOG_FILE   = os.path.join('output', 'submissions.jsonl')
 STORAGE_STATE   = 'state.json'
 OUTPUT_DIR      = 'output'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-PAGE_TIMEOUT    = config.get('page_timeout_ms', 60000)
-WAIT_TIMEOUT    = config.get('element_wait_timeout_ms', 15000)
+PAGE_TIMEOUT    = config.get('page_timeout_ms', 90000)
+WAIT_TIMEOUT    = config.get('element_wait_timeout_ms', 20000)
 ACTION_TIMEOUT = int(PAGE_TIMEOUT / 3)
 WORKER_RETRY_COUNT = 3
 
@@ -107,7 +105,6 @@ progress      = {"current": 0, "total": 0, "lastUpdate": "N/A"}
 run_failures  = []
 start_time    = None
 
-# Playwright objects are now managed in the main execution block
 playwright = None
 browser = None
 
@@ -149,6 +146,9 @@ def load_default_data():
                     'marketplace_id': row[3].strip()
                 })
         app_logger.info(f"{len(urls_data)} stores loaded from urls.csv")
+    except FileNotFoundError:
+        app_logger.error("FATAL: 'urls.csv' not found. Please ensure the file exists and is named correctly (all lowercase).")
+        raise
     except StopIteration:
         app_logger.error("Failed to load urls.csv: File is empty or has no header.")
     except Exception:
@@ -205,7 +205,32 @@ async def perform_login_and_otp(page: Page) -> bool:
     try:
         await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT, wait_until="load")
         app_logger.info("Login page loaded.")
-        
+
+        # ======================= NEW ROBUSTNESS LOGIC =======================
+        # Handle the "Continue shopping" interstitial page sometimes seen in CI environments.
+        # We check for this button with a short timeout.
+        try:
+            # Use a robust selector to find the button
+            continue_button = page.get_by_role('button', name='Continue shopping')
+            
+            # If the button is not visible within 5 seconds, a TimeoutError will be raised,
+            # and the code will jump to the `except` block, proceeding as normal.
+            await expect(continue_button).to_be_visible(timeout=5000)
+            
+            # If the button WAS found, log it and click it.
+            app_logger.info("Interstitial 'Continue shopping' page detected. Clicking to proceed...")
+            await continue_button.click()
+            
+            # Wait for the subsequent page (the real login page) to load
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            app_logger.info("Proceeding after clicking interstitial button.")
+            
+        except TimeoutError:
+            # This is the normal path if the interstitial page does not appear.
+            app_logger.info("No interstitial page found, proceeding directly to login form.")
+        # ===================== END OF NEW ROBUSTNESS LOGIC =====================
+
+        # The rest of the login logic remains the same
         await page.get_by_label("Email or mobile phone number").fill(config['login_email'])
         await page.get_by_label("Continue").click()
 
@@ -215,7 +240,8 @@ async def perform_login_and_otp(page: Page) -> bool:
         await page.wait_for_load_state("domcontentloaded")
         
         # Handle OTP if the page appears
-        if "MFA" in await page.title():
+        # Use a more flexible check for the MFA page
+        if "MFA" in await page.title() or "Authentication required" in await page.title():
             app_logger.info("MFA/OTP page detected.")
             if not config.get('otp_secret_key'):
                 app_logger.error("OTP is required, but 'otp_secret_key' is not configured.")
@@ -223,14 +249,14 @@ async def perform_login_and_otp(page: Page) -> bool:
                 return False
                 
             otp_code = pyotp.TOTP(config['otp_secret_key']).now()
-            await page.get_by_label("Enter OTP").fill(otp_code)
+            # Use a more generic selector for the OTP field
+            await page.locator('input[id*="otp-code"], input[name*="otpCode"]').fill(otp_code)
             
-            # Check the "don't ask again" box if available
             remember_device_checkbox = page.locator("input[type='checkbox'][name='rememberDevice']")
             if await remember_device_checkbox.is_visible(timeout=5000):
                 await remember_device_checkbox.check()
                 
-            await page.get_by_label("Sign in").click()
+            await page.get_by_role("button", name="Sign in").click()
 
         await page.wait_for_timeout(5000) # Wait for redirects to settle
         if "signin" in page.url.lower() or "/ap/" in page.url:
@@ -527,4 +553,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        app_logger.info("Script interrupted by user. Exiting.")  
+        app_logger.info("Script interrupted by user. Exiting.")
