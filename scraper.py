@@ -2,8 +2,7 @@
 #               AMAZON SELLER CENTRAL SCRAPER (CI/CD / COMMAND-LINE VERSION)
 # =======================================================================================
 # This version is optimized for automated environments like GitHub Actions.
-# It includes robust, stabilized login handling for anti-bot pages, race conditions,
-# and post-login account selection pages.
+# It includes resilient, multi-flow login handling for all known page variations.
 # It runs the core data collection and submission process once, then exits.
 # =======================================================================================
 
@@ -200,20 +199,32 @@ async def perform_login_and_otp(page: Page) -> bool:
     app_logger.info(f"Navigating to login page: {LOGIN_URL}")
     try:
         await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT, wait_until="load")
-        app_logger.info("Initial page loaded.")
+        app_logger.info("Initial page loaded. Determining login flow...")
 
-        # --- Handle the "Continue shopping" interstitial page ---
-        try:
-            continue_button = page.get_by_role('button', name='Continue shopping')
-            await expect(continue_button).to_be_visible(timeout=5000)
-            app_logger.info("Interstitial 'Continue shopping' page detected. Clicking to proceed...")
-            await continue_button.click()
-            await expect(page.get_by_label("Email or mobile phone number")).to_be_visible(timeout=15000)
-            app_logger.info("Main login form is now visible.")
-        except TimeoutError:
-            app_logger.info("No interstitial page found, proceeding directly to login form.")
+        # --- THIS IS THE NEW, MULTI-OUTCOME LOGIC ---
+        # Define selectors for all possible starting pages after initial navigation.
+        continue_shopping_selector = 'button:has-text("Continue shopping")'
+        email_field_selector = 'input#ap_email' # A stable selector for the email field
 
-        # --- Perform Login Steps with Robust Waits ---
+        # Wait for EITHER the continue button OR the email field to appear.
+        # This makes the script resilient to different login page variations.
+        await page.wait_for_selector(
+            f"{continue_shopping_selector}, {email_field_selector}",
+            state="visible",
+            timeout=15000
+        )
+        app_logger.info("Initial login element found. Proceeding with appropriate flow.")
+
+        # Now, check which element we found and act accordingly.
+        if await page.locator(continue_shopping_selector).is_visible():
+            app_logger.info("Flow: Interstitial 'Continue shopping' page detected. Clicking it.")
+            await page.locator(continue_shopping_selector).click()
+            # After clicking, we must wait for the email field to appear.
+            await expect(page.locator(email_field_selector)).to_be_visible(timeout=15000)
+        else:
+            app_logger.info("Flow: Login form with email field loaded directly.")
+        
+        # --- FROM HERE, THE REST OF THE LOGIN PROCESS IS THE SAME ---
         await page.get_by_label("Email or mobile phone number").fill(config['login_email'])
         await page.get_by_label("Continue").click()
 
@@ -225,11 +236,9 @@ async def perform_login_and_otp(page: Page) -> bool:
         app_logger.info("Password entered. Clicking Sign-in and waiting for navigation...")
         await page.get_by_label("Sign in").click()
         
-        # --- Handle Post-Login Page (OTP or Dashboard) ---
         app_logger.info("Waiting for page to settle after sign-in...")
         otp_selector = 'input[id*="otp"]'
         dashboard_selector = "#content > div > div.mainAppContainerExternal"
-
         await page.wait_for_selector(f"{otp_selector}, {dashboard_selector}", timeout=30000)
         app_logger.info("Page has settled. Checking for OTP requirement...")
 
@@ -254,11 +263,8 @@ async def perform_login_and_otp(page: Page) -> bool:
         else:
             app_logger.info("OTP not required. Logged in directly.")
 
-        # --- Final Verification ---
-        # THIS IS THE FIX: Wait for EITHER the dashboard OR the account picker page.
         app_logger.info("Verifying successful login by looking for dashboard OR account picker page...")
         account_picker_selector = 'h1:has-text("Select an account")'
-        
         await page.wait_for_selector(f"{dashboard_selector}, {account_picker_selector}", timeout=30000)
 
         if "signin" in page.url.lower() or "/ap/" in page.url:
