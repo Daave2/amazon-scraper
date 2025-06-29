@@ -12,7 +12,11 @@ on:
   # This example runs at 08:00 and 20:00 UTC every day.
   # You can customize it using https://crontab.guru/
   schedule:
-    - cron: '0 8,20 * * *'
+    - cron: '0 9 * * *'
+    - cron: '30 23 * * *'
+    - cron: '30 00 * * *'
+
+
 
 jobs:
   scrape-and-submit:
