@@ -527,4 +527,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        app_logger.info("Script interrupted by user. Exiting.")
+        app_logger.info("Script interrupted by user. Exiting.")  
