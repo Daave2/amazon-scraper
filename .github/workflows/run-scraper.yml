@@ -1,0 +1,71 @@
+# .github/workflows/run-scraper.yml
+
+name: Run Playwright Scraper
+
+# --- TRIGGERS ---
+# This workflow can be triggered in two ways:
+# 1. Manually: via the "Actions" tab in your GitHub repository.
+on:
+  workflow_dispatch:
+
+  # 2. On a Schedule: using a cron expression.
+  # This example runs at 08:00 and 20:00 UTC every day.
+  # You can customize it using https://crontab.guru/
+  schedule:
+    - cron: '0 8,20 * * *'
+
+jobs:
+  scrape-and-submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60 # Stop the job if it runs for more than 60 minutes
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Browsers and system dependencies
+        # The --with-deps flag is crucial on Linux runners
+        run: playwright install --with-deps chromium
+
+      - name: Create config.json from GitHub Secrets
+        # This step securely builds the config file that the script needs
+        run: |
+          echo '{
+            "debug": false,
+            "form_url": "${{ secrets.FORM_URL }}",
+            "login_url": "${{ secrets.LOGIN_URL }}",
+            "secret_key": "${{ secrets.SECRET_KEY }}",
+            "login_email": "${{ secrets.LOGIN_EMAIL }}",
+            "login_password": "${{ secrets.LOGIN_PASSWORD }}",
+            "otp_secret_key": "${{ secrets.OTP_SECRET_KEY }}",
+            "initial_concurrency": 8,
+            "num_form_submitters": 2,
+            "page_timeout_ms": 90000,
+            "element_wait_timeout_ms": 20000,
+            "auto_concurrency": { "enabled": false }
+          }' > config.json
+
+      - name: Run the scraper script
+        # This command executes your Python script
+        run: python scraper.py # <--- Make sure this filename matches yours!
+
+      - name: Upload logs and screenshots as artifacts
+        # This step runs even if the script fails, so you can debug what went wrong
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-output-${{ github.run_id }}
+          path: |
+            output/
+            app.log
+            state.json
