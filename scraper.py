@@ -2,13 +2,9 @@
 #               AMAZON SELLER CENTRAL SCRAPER (CI/CD / COMMAND-LINE VERSION)
 # =======================================================================================
 # This version is optimized for automated environments like GitHub Actions.
-# It includes robust, stabilized login handling for anti-bot pages and race conditions.
+# It includes robust, stabilized login handling for anti-bot pages, race conditions,
+# and post-login account selection pages.
 # It runs the core data collection and submission process once, then exits.
-#
-# To run:
-# 1. Ensure `config.json` and `urls.csv` are in the same directory.
-# 2. Ensure all dependencies from requirements.txt are installed.
-# 3. Execute from your terminal: python scraper.py
 # =======================================================================================
 
 import logging
@@ -212,18 +208,15 @@ async def perform_login_and_otp(page: Page) -> bool:
             await expect(continue_button).to_be_visible(timeout=5000)
             app_logger.info("Interstitial 'Continue shopping' page detected. Clicking to proceed...")
             await continue_button.click()
-            # Wait for the real login page to appear after the click
             await expect(page.get_by_label("Email or mobile phone number")).to_be_visible(timeout=15000)
             app_logger.info("Main login form is now visible.")
         except TimeoutError:
             app_logger.info("No interstitial page found, proceeding directly to login form.")
 
         # --- Perform Login Steps with Robust Waits ---
-        # Step 1: Fill Email and click Continue
         await page.get_by_label("Email or mobile phone number").fill(config['login_email'])
         await page.get_by_label("Continue").click()
 
-        # Step 2: Wait for Password field, then fill and click Sign in
         app_logger.info("Waiting for password field...")
         password_field = page.get_by_label("Password")
         await expect(password_field).to_be_visible(timeout=10000)
@@ -252,7 +245,6 @@ async def perform_login_and_otp(page: Page) -> bool:
             await otp_field.fill(otp_code)
             
             remember_device_checkbox = page.locator("input[type='checkbox'][name='rememberDevice']")
-            # THIS IS THE FIX: is_visible() does not take a timeout argument.
             if await remember_device_checkbox.is_visible():
                 app_logger.info("Checking 'Don't require OTP on this browser' checkbox.")
                 await remember_device_checkbox.check()
@@ -263,9 +255,12 @@ async def perform_login_and_otp(page: Page) -> bool:
             app_logger.info("OTP not required. Logged in directly.")
 
         # --- Final Verification ---
-        app_logger.info("Verifying successful login by looking for dashboard content...")
-        final_dashboard_check = page.locator(dashboard_selector)
-        await expect(final_dashboard_check).to_be_visible(timeout=30000)
+        # After login, we can land on the dashboard OR an account picker page. Both are valid successes.
+        app_logger.info("Verifying successful login by looking for dashboard OR account picker page...")
+        account_picker_selector = 'h1:has-text("Select an account")'
+        
+        # Wait for either the dashboard OR the account picker to appear. This confirms login is complete.
+        await page.wait_for_selector(f"{dashboard_selector}, {account_picker_selector}", timeout=30000)
 
         if "signin" in page.url.lower() or "/ap/" in page.url:
             app_logger.error("Login failed: Ended up on a sign-in page unexpectedly.")
