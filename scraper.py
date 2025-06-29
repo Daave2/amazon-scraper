@@ -2,7 +2,7 @@
 #               AMAZON SELLER CENTRAL SCRAPER (CI/CD / COMMAND-LINE VERSION)
 # =======================================================================================
 # This version is optimized for automated environments like GitHub Actions.
-# It includes robust login handling for anti-bot pages.
+# It includes robust, stabilized login handling for anti-bot pages and race conditions.
 # It runs the core data collection and submission process once, then exits.
 #
 # To run:
@@ -204,67 +204,81 @@ async def perform_login_and_otp(page: Page) -> bool:
     app_logger.info(f"Navigating to login page: {LOGIN_URL}")
     try:
         await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT, wait_until="load")
-        app_logger.info("Login page loaded.")
+        app_logger.info("Initial page loaded.")
 
-        # ======================= NEW ROBUSTNESS LOGIC =======================
-        # Handle the "Continue shopping" interstitial page sometimes seen in CI environments.
-        # We check for this button with a short timeout.
+        # --- Handle the "Continue shopping" interstitial page ---
         try:
-            # Use a robust selector to find the button
             continue_button = page.get_by_role('button', name='Continue shopping')
-            
-            # If the button is not visible within 5 seconds, a TimeoutError will be raised,
-            # and the code will jump to the `except` block, proceeding as normal.
             await expect(continue_button).to_be_visible(timeout=5000)
-            
-            # If the button WAS found, log it and click it.
             app_logger.info("Interstitial 'Continue shopping' page detected. Clicking to proceed...")
             await continue_button.click()
-            
-            # Wait for the subsequent page (the real login page) to load
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
-            app_logger.info("Proceeding after clicking interstitial button.")
-            
+            # Wait for the real login page to appear after the click
+            await expect(page.get_by_label("Email or mobile phone number")).to_be_visible(timeout=15000)
+            app_logger.info("Main login form is now visible.")
         except TimeoutError:
-            # This is the normal path if the interstitial page does not appear.
             app_logger.info("No interstitial page found, proceeding directly to login form.")
-        # ===================== END OF NEW ROBUSTNESS LOGIC =====================
 
-        # The rest of the login logic remains the same
+        # --- Perform Login Steps with Robust Waits ---
+        # Step 1: Fill Email and click Continue
         await page.get_by_label("Email or mobile phone number").fill(config['login_email'])
         await page.get_by_label("Continue").click()
 
-        await page.get_by_label("Password").fill(config['login_password'])
+        # Step 2: Wait for Password field, then fill and click Sign in
+        app_logger.info("Waiting for password field...")
+        password_field = page.get_by_label("Password")
+        await expect(password_field).to_be_visible(timeout=10000)
+        await password_field.fill(config['login_password'])
+        
+        app_logger.info("Password entered. Clicking Sign-in and waiting for navigation...")
+        # This is a critical step. We click and then immediately wait for the page to change.
         await page.get_by_label("Sign in").click()
         
-        await page.wait_for_load_state("domcontentloaded")
-        
-        # Handle OTP if the page appears
-        # Use a more flexible check for the MFA page
-        if "MFA" in await page.title() or "Authentication required" in await page.title():
-            app_logger.info("MFA/OTP page detected.")
+        # --- Handle Post-Login Page (OTP or Dashboard) ---
+        app_logger.info("Waiting for page to settle after sign-in...")
+
+        # We wait for one of two things: the OTP input field, or a known element on the dashboard.
+        # This is much more stable than checking the URL or title during a navigation.
+        otp_selector = 'input[id*="otp"]'
+        dashboard_selector = "#content > div > div.mainAppContainerExternal" # A stable container on the dashboard
+
+        # Wait for either the OTP page or the dashboard to load.
+        await page.wait_for_selector(f"{otp_selector}, {dashboard_selector}", timeout=30000)
+        app_logger.info("Page has settled. Checking for OTP requirement...")
+
+        # Now, check if the OTP field is actually visible.
+        otp_field = page.locator(otp_selector)
+        if await otp_field.is_visible():
+            app_logger.info("Two-Step Verification (OTP) is required.")
             if not config.get('otp_secret_key'):
                 app_logger.error("OTP is required, but 'otp_secret_key' is not configured.")
                 await _save_screenshot(page, "login_fail_otp_no_key")
                 return False
                 
             otp_code = pyotp.TOTP(config['otp_secret_key']).now()
-            # Use a more generic selector for the OTP field
-            await page.locator('input[id*="otp-code"], input[name*="otpCode"]').fill(otp_code)
+            await otp_field.fill(otp_code)
             
             remember_device_checkbox = page.locator("input[type='checkbox'][name='rememberDevice']")
-            if await remember_device_checkbox.is_visible(timeout=5000):
+            if await remember_device_checkbox.is_visible(timeout=3000):
                 await remember_device_checkbox.check()
-                
+            
+            # The submit button can have different labels
             await page.get_by_role("button", name="Sign in").click()
+            app_logger.info("OTP submitted.")
+        else:
+            app_logger.info("OTP not required. Logged in directly.")
 
-        await page.wait_for_timeout(5000) # Wait for redirects to settle
+        # --- Final Verification ---
+        # Wait for a definitive element on the dashboard to confirm successful login
+        app_logger.info("Verifying successful login by looking for dashboard content...")
+        final_dashboard_check = page.locator(dashboard_selector)
+        await expect(final_dashboard_check).to_be_visible(timeout=30000)
+
         if "signin" in page.url.lower() or "/ap/" in page.url:
-            app_logger.error("Login failed: Still on a sign-in page after all steps.")
-            await _save_screenshot(page, "login_fail_stuck_on_signin")
+            app_logger.error("Login failed: Ended up on a sign-in page unexpectedly.")
+            await _save_screenshot(page, "login_fail_final_check")
             return False
         
-        app_logger.info("Login process appears successful.")
+        app_logger.info("Login process appears fully successful.")
         return True
     except Exception as e:
         app_logger.critical(f"Critical error during login process: {e}", exc_info=DEBUG_MODE)
