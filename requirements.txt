@@ -1,0 +1,7 @@
+# requirements.txt
+quart
+apscheduler
+playwright
+pyotp
+psutil
+pytz
