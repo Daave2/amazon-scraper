@@ -255,11 +255,10 @@ async def perform_login_and_otp(page: Page) -> bool:
             app_logger.info("OTP not required. Logged in directly.")
 
         # --- Final Verification ---
-        # After login, we can land on the dashboard OR an account picker page. Both are valid successes.
+        # THIS IS THE FIX: Wait for EITHER the dashboard OR the account picker page.
         app_logger.info("Verifying successful login by looking for dashboard OR account picker page...")
         account_picker_selector = 'h1:has-text("Select an account")'
         
-        # Wait for either the dashboard OR the account picker to appear. This confirms login is complete.
         await page.wait_for_selector(f"{dashboard_selector}, {account_picker_selector}", timeout=30000)
 
         if "signin" in page.url.lower() or "/ap/" in page.url:
