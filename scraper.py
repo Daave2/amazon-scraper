@@ -258,7 +258,8 @@ async def perform_login_and_otp(page: Page) -> bool:
             await otp_field.fill(otp_code)
             
             remember_device_checkbox = page.locator("input[type='checkbox'][name='rememberDevice']")
-            if await remember_device_checkbox.is_visible(timeout=3000):
+            # THIS IS THE FIX: is_visible() does not take a timeout argument.
+            if await remember_device_checkbox.is_visible():
                 await remember_device_checkbox.check()
             
             # The submit button can have different labels
