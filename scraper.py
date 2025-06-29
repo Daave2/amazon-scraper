@@ -230,22 +230,16 @@ async def perform_login_and_otp(page: Page) -> bool:
         await password_field.fill(config['login_password'])
         
         app_logger.info("Password entered. Clicking Sign-in and waiting for navigation...")
-        # This is a critical step. We click and then immediately wait for the page to change.
         await page.get_by_label("Sign in").click()
         
         # --- Handle Post-Login Page (OTP or Dashboard) ---
         app_logger.info("Waiting for page to settle after sign-in...")
-
-        # We wait for one of two things: the OTP input field, or a known element on the dashboard.
-        # This is much more stable than checking the URL or title during a navigation.
         otp_selector = 'input[id*="otp"]'
-        dashboard_selector = "#content > div > div.mainAppContainerExternal" # A stable container on the dashboard
+        dashboard_selector = "#content > div > div.mainAppContainerExternal"
 
-        # Wait for either the OTP page or the dashboard to load.
         await page.wait_for_selector(f"{otp_selector}, {dashboard_selector}", timeout=30000)
         app_logger.info("Page has settled. Checking for OTP requirement...")
 
-        # Now, check if the OTP field is actually visible.
         otp_field = page.locator(otp_selector)
         if await otp_field.is_visible():
             app_logger.info("Two-Step Verification (OTP) is required.")
@@ -260,16 +254,15 @@ async def perform_login_and_otp(page: Page) -> bool:
             remember_device_checkbox = page.locator("input[type='checkbox'][name='rememberDevice']")
             # THIS IS THE FIX: is_visible() does not take a timeout argument.
             if await remember_device_checkbox.is_visible():
+                app_logger.info("Checking 'Don't require OTP on this browser' checkbox.")
                 await remember_device_checkbox.check()
             
-            # The submit button can have different labels
             await page.get_by_role("button", name="Sign in").click()
             app_logger.info("OTP submitted.")
         else:
             app_logger.info("OTP not required. Logged in directly.")
 
         # --- Final Verification ---
-        # Wait for a definitive element on the dashboard to confirm successful login
         app_logger.info("Verifying successful login by looking for dashboard content...")
         final_dashboard_check = page.locator(dashboard_selector)
         await expect(final_dashboard_check).to_be_visible(timeout=30000)
