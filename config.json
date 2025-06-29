@@ -1,0 +1,27 @@
+{
+    "secret_key": "your_secret_key",
+    "chat_webhook_url": "https://chat.googleapis.com/v1/spaces/AAAAQD6mMVw/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=0wC7CtwEAGFAYVFTKEOlwsvy6FZ3CLqF8T29sVqRZ3Y",
+    "form_url": "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/viewform?hl=en",
+    "login_url": "https://sellercentral.amazon.co.uk/ap/signin?openid.pape.max_auth_age=900&openid.return_to=https%3A%2F%2Fsellercentral.amazon.co.uk%2Fsnowdash%3Fmons_sel_dir_mcid%3Damzn1.merchant.d.ADCTYK7ZDZ3AJG55TWLDKHVPEU7Q%26mons_sel_mkid%3DAM7DNVYQULIQ5%26mons_sel_dir_paid%3Damzn1.pa.d.AC5SCORDKVABET36OI32HPSR7K3A%26ignore_selection_changed%3Dtrue&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=sc_uk_amazon_v2&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&mons_redirect=sign_in&ssoResponse=eyJ6aXAiOiJERUYiLCJlbmMiOiJBMjU2R0NNIiwiYWxnIjoiQTI1NktXIn0.nIxDt6YB6oQ20szF9uPcUAsvJeUex6GYuJC79NFGEc_0g5C0RKA0hw.9vWwKREZ-4z4ZT8N._i6p8USp4eccQS46LYe47Th1ZBSFiWsiJhb2srIh7niZisOyGeT6kL2gCSLSTHRZwElkCN6AMqcX5kqsZ3H3PqYtouGCc34W2fhFaMc3dZ9eEonHaM0zMQ3bRaJXqehr4at6YdLv3Si3JMkh8vouqCAwr9Wq_jxu0nDxekiJtkdpVqOCTI68BM_Ce9DFBd_XS5NFOTw8.MEIbisUMWZaNBcRUH9M5nw",
+    "login_email": "niki.cooke@morrisonsplc.co.uk",
+    "login_password": "Nextfriday",
+    "otp_secret_key": "7EF4D6RSNMXU7GZ3HVM4CTSAPJMCK5L3QW5KW42H5LVASIBPNENA",
+    "max_concurrency": 30,
+    "min_concurrency": 1,
+    "initial_concurrency": 15,
+    "num_form_submitters": 5,
+    "marketplace_id": "ACZ4M364GT4NEK",
+	"target_url": "https://sellercentral.amazon.co.uk/snowdash?mons_sel_mkid=amzn1.mp.o.AM7DNVYQULIQ5&mons_sel_dir_mcid=amzn1.merchant.d.AB5R6KPDZD4NUOU6P55IEU7C3HRQ&mons_sel_dir_paid=amzn1.pa.d.AAPWDLKP7WKRYQPYLMZNO55RYOTQ&ignore_selection_changed=true",
+    "debug": false,
+    "schedule_times": ["10:00", "16:00", "19:00"],
+    "auto_concurrency": {
+      "enabled": true,
+      "min_concurrency": 1,
+      "max_concurrency": 50,
+      "cpu_upper_threshold": 90,
+      "cpu_lower_threshold": 65,
+      "mem_upper_threshold": 90,
+      "check_interval_seconds": 5,
+      "cooldown_seconds": 15
+  }
+  }

@@ -1,0 +1,14 @@
+# Ignore configuration files with secrets
+config.json
+state.json
+
+# Ignore output folders
+output/
+
+# Ignore log files
+app.log
+
+# Ignore Python virtual environment and cache
+.venv/
+__pycache__/
+*.pyc
