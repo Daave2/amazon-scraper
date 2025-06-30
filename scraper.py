@@ -189,6 +189,14 @@ def ensure_storage_state():
         return False
 
 async def auto_concurrency_manager():
+    """Dynamically adjust worker concurrency based on system load.
+
+    The manager periodically checks CPU and memory usage and raises or lowers
+    the global ``concurrency_limit`` within the range configured in
+    ``config.json``. Updates are throttled by ``COOLDOWN_SECONDS`` to avoid
+    rapid fluctuations. All waiting workers are notified when the limit
+    changes.
+    """
     global concurrency_limit, last_concurrency_change
     if not AUTO_ENABLED:
         return
@@ -242,6 +250,20 @@ async def check_if_login_needed(page: Page, test_url: str) -> bool:
         return True
 
 async def perform_login_and_otp(page: Page) -> bool:
+    """Log in to Seller Central and handle OTP if prompted.
+
+    This routine navigates to the login page, fills in the credentials from the
+    configuration file and, if two-factor authentication is enabled, submits the
+    current TOTP value. When the dashboard or account picker page becomes
+    visible the function returns ``True``. Any unexpected issue results in a
+    screenshot and ``False`` is returned.
+
+    Args:
+        page (Page): Playwright page instance used for the login flow.
+
+    Returns:
+        bool: ``True`` on a successful login, ``False`` otherwise.
+    """
     app_logger.info(f"Navigating to login page: {LOGIN_URL}")
     try:
         await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT, wait_until="load")
@@ -374,6 +396,23 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
     app_logger.info(f"{log_prefix} Shut down.")
 
 async def data_collector_worker(browser: Browser, store_info: Dict[str,str], storage_template: Dict, queue: Queue):
+    """Collect metrics for a single store and enqueue them for submission.
+
+    A new browser context is created using the provided ``storage_template`` to
+    reuse authenticated session data. After navigating to the store's dashboard
+    the worker waits for the network response containing the performance
+    metrics, parses the required fields and puts a formatted dictionary into the
+    submission ``queue``. Failures are retried up to ``WORKER_RETRY_COUNT``
+    before the store is marked as failed.
+
+    Args:
+        browser (Browser): Shared Playwright browser instance.
+        store_info (Dict[str, str]): Mapping containing ``merchant_id``,
+            ``store_name`` and ``marketplace_id`` keys for the target store.
+        storage_template (Dict): Storage state template with authentication
+            cookies.
+        queue (Queue): Queue into which collected metrics are placed.
+    """
     merchant_id = store_info['merchant_id']
     store_name  = store_info['store_name']
     for attempt in range(WORKER_RETRY_COUNT):
