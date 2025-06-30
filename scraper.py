@@ -32,8 +32,10 @@ import psutil
 import random
 
 import aiohttp
+import aiofiles
 import ssl
 import certifi
+import io
 
 #######################################################################
 #                            CONFIG & CONSTANTS
@@ -109,7 +111,7 @@ app_logger = setup_logging()
 #                      GLOBALS
 #######################################################################
 
-log_lock      = Lock()
+log_lock      = asyncio.Lock()
 progress_lock = Lock()
 urls_data     = []
 progress      = {"current": 0, "total": 0, "lastUpdate": "N/A"}
@@ -270,21 +272,27 @@ async def prime_master_session() -> bool:
 #                  OPTIMIZED ARCHITECTURE: WORKERS & LOGGING
 #######################################################################
 
-def log_submission(data: Dict[str,str]):
-    with log_lock:
+async def log_submission(data: Dict[str,str]):
+    async with log_lock:
         current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_entry = {'timestamp': current_timestamp, **data}
         fieldnames = ['timestamp','store','orders','units','fulfilled','uph','inf','found','cancelled','lates','time_available']
         new_csv = not os.path.exists(LOG_FILE)
         try:
-            with open(LOG_FILE,'a',newline='', encoding='utf-8') as f:
-                w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-                if new_csv: w.writeheader()
-                w.writerow(log_entry)
-        except IOError as e: app_logger.error(f"Error writing to CSV log file {LOG_FILE}: {e}")
+            csv_buffer = io.StringIO()
+            writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames, extrasaction='ignore')
+            if new_csv:
+                writer.writeheader()
+            writer.writerow(log_entry)
+            async with aiofiles.open(LOG_FILE, 'a', newline='', encoding='utf-8') as f:
+                await f.write(csv_buffer.getvalue())
+        except IOError as e:
+            app_logger.error(f"Error writing to CSV log file {LOG_FILE}: {e}")
         try:
-            with open(JSON_LOG_FILE, 'a', encoding='utf-8') as f: f.write(json.dumps(log_entry) + '\n')
-        except IOError as e: app_logger.error(f"Error writing to JSON log file {JSON_LOG_FILE}: {e}")
+            async with aiofiles.open(JSON_LOG_FILE, 'a', encoding='utf-8') as f:
+                await f.write(json.dumps(log_entry) + '\n')
+        except IOError as e:
+            app_logger.error(f"Error writing to JSON log file {JSON_LOG_FILE}: {e}")
 
 async def http_form_submitter_worker(queue: Queue, worker_id: int):
     log_prefix = f"[HTTP-Submitter-{worker_id}]"
@@ -302,7 +310,7 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
                 payload = {FIELD_MAP[key]: value for key, value in form_data.items() if key in FIELD_MAP}
                 async with session.post(FORM_POST_URL, data=payload) as resp:
                     if resp.status == 200:
-                        log_submission(form_data)
+                        await log_submission(form_data)
                         with progress_lock:
                             progress["current"] += 1
                             progress["lastUpdate"] = f"{datetime.now().strftime('%H:%M')} [Submitted] {store_name}"

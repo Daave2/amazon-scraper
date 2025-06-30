@@ -5,3 +5,4 @@ psutil
 pytz
 aiohttp
 certifi
+aiofiles
