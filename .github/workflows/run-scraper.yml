@@ -117,7 +117,7 @@ jobs:
           "login_email":     "${LOGIN_EMAIL}",
           "login_password":  "${LOGIN_PASSWORD}",
           "otp_secret_key":  "${OTP_SECRET_KEY}",
-          "initial_concurrency": 20,
+          "initial_concurrency": 10,
           "num_form_submitters": 2,
           "page_timeout_ms": 90000,
           "element_wait_timeout_ms": 20000,
