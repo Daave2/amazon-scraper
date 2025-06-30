@@ -73,6 +73,16 @@ FIELD_MAP = {
 INITIAL_CONCURRENCY = config.get('initial_concurrency', 10)
 NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 2)
 
+AUTO_CONF = config.get('auto_concurrency', {})
+AUTO_ENABLED = AUTO_CONF.get('enabled', False)
+AUTO_MIN_CONCURRENCY = AUTO_CONF.get('min_concurrency', config.get('min_concurrency', 1))
+AUTO_MAX_CONCURRENCY = AUTO_CONF.get('max_concurrency', config.get('max_concurrency', INITIAL_CONCURRENCY))
+CPU_UPPER_THRESHOLD = AUTO_CONF.get('cpu_upper_threshold', 90)
+CPU_LOWER_THRESHOLD = AUTO_CONF.get('cpu_lower_threshold', 65)
+MEM_UPPER_THRESHOLD = AUTO_CONF.get('mem_upper_threshold', 90)
+CHECK_INTERVAL = AUTO_CONF.get('check_interval_seconds', 5)
+COOLDOWN_SECONDS = AUTO_CONF.get('cooldown_seconds', 15)
+
 LOG_FILE        = os.path.join('output', 'submissions.log')
 JSON_LOG_FILE   = os.path.join('output', 'submissions.jsonl')
 STORAGE_STATE   = 'state.json'
@@ -125,6 +135,8 @@ concurrency_limit = INITIAL_CONCURRENCY
 active_workers_count = 0
 concurrency_condition = asyncio.Condition()
 
+last_concurrency_change = 0.0
+
 #######################################################################
 #                          UTILITIES
 #######################################################################
@@ -175,6 +187,38 @@ def ensure_storage_state():
         return True
     except json.JSONDecodeError:
         return False
+
+async def auto_concurrency_manager():
+    global concurrency_limit, last_concurrency_change
+    if not AUTO_ENABLED:
+        return
+    app_logger.info(
+        f"Auto-concurrency enabled with range {AUTO_MIN_CONCURRENCY}-{AUTO_MAX_CONCURRENCY}"
+    )
+    while True:
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory().percent
+        now = asyncio.get_event_loop().time()
+        if now - last_concurrency_change >= COOLDOWN_SECONDS:
+            if (cpu > CPU_UPPER_THRESHOLD or mem > MEM_UPPER_THRESHOLD) and concurrency_limit > AUTO_MIN_CONCURRENCY:
+                concurrency_limit -= 1
+                last_concurrency_change = now
+                app_logger.info(
+                    f"Auto-concurrency: decreased to {concurrency_limit} (CPU {cpu:.1f}%, MEM {mem:.1f}%)"
+                )
+            elif cpu < CPU_LOWER_THRESHOLD and mem < MEM_UPPER_THRESHOLD and concurrency_limit < AUTO_MAX_CONCURRENCY:
+                concurrency_limit += 1
+                last_concurrency_change = now
+                app_logger.info(
+                    f"Auto-concurrency: increased to {concurrency_limit} (CPU {cpu:.1f}%, MEM {mem:.1f}%)"
+                )
+            if concurrency_limit > AUTO_MAX_CONCURRENCY:
+                concurrency_limit = AUTO_MAX_CONCURRENCY
+            if concurrency_limit < AUTO_MIN_CONCURRENCY:
+                concurrency_limit = AUTO_MIN_CONCURRENCY
+            async with concurrency_condition:
+                concurrency_condition.notify_all()
+        await asyncio.sleep(CHECK_INTERVAL)
 
 #######################################################################
 #                     AUTHENTICATION & SESSION PRIMING
@@ -493,6 +537,10 @@ async def process_urls():
         for i in range(NUM_FORM_SUBMITTERS)
     ]
 
+    auto_task = None
+    if AUTO_ENABLED:
+        auto_task = asyncio.create_task(auto_concurrency_manager())
+
     with progress_lock: progress = {"current": 0, "total": len(urls_data), "lastUpdate": "N/A"}
     start_time = datetime.now()
 
@@ -505,6 +553,10 @@ async def process_urls():
     app_logger.info("Cancelling form submitter workers...")
     for task in form_submitter_tasks: task.cancel()
     await asyncio.gather(*form_submitter_tasks, return_exceptions=True)
+
+    if auto_task:
+        auto_task.cancel()
+        await asyncio.gather(auto_task, return_exceptions=True)
 
     elapsed = (datetime.now() - start_time).total_seconds()
     app_logger.info(f"Processing finished. Processed {progress['current']}/{progress['total']} in {elapsed:.2f}s")
