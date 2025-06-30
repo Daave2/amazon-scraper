@@ -444,10 +444,13 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
         }
 
         payload = {
-            "cards": [
+            "cardsV2": [
                 {
-                    "header": {"title": "Seller Central Metrics"},
-                    "sections": [batch_section],
+                    "cardId": f"batch-{chat_batch_count}",
+                    "card": {
+                        "header": {"title": "Seller Central Metrics"},
+                        "sections": [batch_section],
+                    },
                 }
             ]
         }
