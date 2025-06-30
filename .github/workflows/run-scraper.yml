@@ -122,7 +122,7 @@ jobs:
           "num_form_submitters": 2,
           "page_timeout_ms": 90000,
           "element_wait_timeout_ms": 20000,
-          "auto_concurrency": { "enabled": false }
+          "auto_concurrency": { "enabled": true }
         }
         JSON
 
