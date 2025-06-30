@@ -409,8 +409,8 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
         )
         header_text = f"{batch_header}  Batch {chat_batch_count} ({len(entries)} stores)"
 
-        widgets: List[Dict[str, Any]] = []
-        for i, entry in enumerate(entries):
+        sections: List[Dict[str, Any]] = []
+        for entry in entries:
             store_name = entry.get("store", "Store")
             first_line = f"Orders: {entry.get('orders', 'N/A')} | Units: {entry.get('units', 'N/A')}"
             second_line = (
@@ -422,7 +422,12 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
                 f" Time Available: {entry.get('time_available', 'N/A')}"
             )
 
-            widgets.append(
+            header = (
+                f"{store_name} - INF: {entry.get('inf', 'N/A')} | "
+                f"Lates: {entry.get('lates', 'N/A')} | UPH: {entry.get('uph', 'N/A')}"
+            )
+
+            widgets = [
                 {
                     "decoratedText": {
                         "icon": {"knownIcon": "SHOPPING_CART"},
@@ -430,26 +435,29 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
                         "text": first_line,
                         "bottomLabel": second_line,
                     }
+                },
+                {"textParagraph": {"text": third_line}},
+            ]
+
+            sections.append(
+                {
+                    "header": header,
+                    "collapsible": True,
+                    "uncollapsibleWidgetsCount": 0,
+                    "widgets": widgets,
                 }
             )
-            widgets.append({"textParagraph": {"text": third_line}})
-            if i < len(entries) - 1:
-                widgets.append({"divider": {}})
-
-        batch_section = {
-            "header": header_text,
-            "collapsible": True,
-            "uncollapsibleWidgetsCount": 0,
-            "widgets": widgets,
-        }
 
         payload = {
             "cardsV2": [
                 {
                     "cardId": f"batch-{chat_batch_count}",
                     "card": {
-                        "header": {"title": "Seller Central Metrics"},
-                        "sections": [batch_section],
+                        "header": {
+                            "title": "Seller Central Metrics",
+                            "subtitle": header_text,
+                        },
+                        "sections": sections,
                     },
                 }
             ]
