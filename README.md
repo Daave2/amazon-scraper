@@ -70,8 +70,8 @@ schedule. It checks the current UK time against `UK_TARGET_HOURS` to decide
 whether to proceed with a run.
 
 Secrets expected by the workflow include `FORM_URL`, `LOGIN_URL`, `SECRET_KEY`,
-`LOGIN_EMAIL`, `LOGIN_PASSWORD` and `OTP_SECRET_KEY`. These map to the fields in
-`config.example.json`.
+`LOGIN_EMAIL`, `LOGIN_PASSWORD`, `OTP_SECRET_KEY` and `CHAT_WEBHOOK_URL`. These
+map to the fields in `config.example.json`.
 
 Artifacts such as logs are uploaded for each run and kept for seven days.
 
@@ -85,7 +85,7 @@ Key options from `config.example.json`:
 - `initial_concurrency` – number of concurrent browser workers
 - `num_form_submitters` – number of HTTP workers sending form data
 - `auto_concurrency` – optional automatic scaling of concurrency limits. When enabled, the scraper adjusts `concurrency_limit` between `min_concurrency` and `max_concurrency` based on CPU and memory load.
-- `chat_webhook_url` – optional Google Chat webhook to post progress messages
+- `chat_webhook_url` – optional Google Chat webhook to post progress messages. When configured, each JSON result is also sent to the chat
 - `schedule_times` – optional list of times (HH:MM) to run the scraper when using automation
 - `debug` – enable verbose logging and save extra screenshots
 - `max_concurrency` / `min_concurrency` – bounds for automatically adjusted concurrency
