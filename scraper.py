@@ -88,7 +88,7 @@ except json.JSONDecodeError:
 DEBUG_MODE      = config.get('debug', False)
 LOGIN_URL       = config['login_url']
 CHAT_WEBHOOK_URL = config.get('chat_webhook_url')
-CHAT_BATCH_SIZE  = config.get('chat_batch_size', 50)
+CHAT_BATCH_SIZE  = config.get('chat_batch_size', 100)
 
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
