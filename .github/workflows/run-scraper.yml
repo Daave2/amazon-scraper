@@ -1,12 +1,18 @@
 name: Run Playwright Scraper
 
-# ── TRIGGERS ────────────────────────────────────────────────────────────────
+# ==============================================================================
+# ─── TRIGGERS ─────────────────────────────────────────────────────────────────
+# This section defines WHEN the scraper runs.
+# ==============================================================================
 on:
-  workflow_dispatch:           # manual trigger
-  schedule:                    # scheduled runs (times are in UTC)
-    - cron: '0 9 * * *'        # 09:00 UTC
-    - cron: '30 23 * * *'      # 23:30 UTC
-    - cron: '45 5 * * *'       # 05:45 UTC
+  # 1. MANUAL TRIGGER: Allows you to run the scraper anytime from the "Actions" tab in GitHub.
+  workflow_dispatch:
+
+  # 2. SCHEDULED RUNS:
+  #    This workflow runs at the start of EVERY hour. A check job then determines
+  #    if it's the correct UK local time to proceed with the main scrape.
+  schedule:
+    - cron: '0 * * * *'
 
 # Abort an older run of the same branch if a new one starts
 concurrency:
@@ -15,18 +21,58 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11'
-  PLAYWRIGHT_BROWSERS_PATH: /opt/playwright   # browsers cached across jobs
+  PLAYWRIGHT_BROWSERS_PATH: /opt/playwright
+  # DEFINE YOUR TARGET UK HOURS HERE (24-hour format)
+  # The main job will only run if the current UK hour is in this list.
+  UK_TARGET_HOURS: '14 01 20'
 
 jobs:
+  # ==============================================================================
+  # JOB 1: CHECK TIME
+  # This job runs every hour, checks the current time in London, and decides
+  # whether the main 'scrape-and-submit' job should run.
+  # ==============================================================================
+  check-time:
+    runs-on: ubuntu-latest
+    outputs:
+      # This output will be 'true' if it's the right time, 'false' otherwise.
+      run_job: ${{ steps.check_hour.outputs.run_job }}
+    steps:
+      - name: Check current UK hour against target hours
+        id: check_hour
+        run: |
+          # Get the current hour in London timezone (e.g., "09", "10", "17")
+          CURRENT_UK_HOUR=$(TZ="Europe/London" date +'%k' | xargs)
+
+          echo "Current UK hour is: ${CURRENT_UK_HOUR}"
+          echo "Target hours are: ${{ env.UK_TARGET_HOURS }}"
+
+          # Check if the current hour is in our list of target hours
+          if [[ " ${{ env.UK_TARGET_HOURS }} " =~ " ${CURRENT_UK_HOUR} " ]]; then
+            echo "It's a target time. The main job will run."
+            echo "run_job=true" >> $GITHUB_OUTPUT
+          else
+            echo "Not a target time. The main job will be skipped."
+            echo "run_job=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ==============================================================================
+  # JOB 2: SCRAPE AND SUBMIT
+  # This is your main job. It will ONLY run if the 'check-time' job above
+  # determined that it's the correct time.
+  # ==============================================================================
   scrape-and-submit:
+    # This job depends on the 'check-time' job completing first.
+    needs: check-time
+    # This is the crucial line: it only runs if the output from the previous job is 'true'.
+    if: needs.check-time.outputs.run_job == 'true'
+
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-    # 1. Checkout
     - uses: actions/checkout@v4
 
-    # 2. Cache pip download dir (+ use setup-python’s built-in “cache: pip”)
     - name: Cache pip
       uses: actions/cache@v4
       with:
@@ -35,21 +81,19 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-pip-
 
-    # 3. Python
-    - uses: actions/setup-python@v5
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
-        cache: 'pip'                # second-layer wheel cache
+        cache: 'pip'
 
-    - name: Install Python deps
+    - name: Install Python dependencies
       run: pip install -r requirements.txt
 
-    # 4. Playwright (browsers are cached in /opt/playwright automatically)
     - name: Install Playwright browsers & deps
       run: python -m playwright install --with-deps chromium
 
-    # 5. Build config.json from Secrets (keeps them masked in logs)
-    - name: Build runtime config
+    - name: Build runtime config from Secrets
       env:
         FORM_URL:        ${{ secrets.FORM_URL }}
         LOGIN_URL:       ${{ secrets.LOGIN_URL }}
@@ -58,8 +102,6 @@ jobs:
         LOGIN_PASSWORD:  ${{ secrets.LOGIN_PASSWORD }}
         OTP_SECRET_KEY:  ${{ secrets.OTP_SECRET_KEY }}
       run: |
-        # THIS IS THE FIX: The delimiter 'JSON' is NOT in single quotes.
-        # This allows the shell to expand the environment variables like ${FORM_URL}.
         cat > config.json <<JSON
         {
           "debug": false,
@@ -69,20 +111,18 @@ jobs:
           "login_email":     "${LOGIN_EMAIL}",
           "login_password":  "${LOGIN_PASSWORD}",
           "otp_secret_key":  "${OTP_SECRET_KEY}",
-          "initial_concurrency": 8,
-          "num_form_submitters": 2,
+          "initial_concurrency": 15,
+          "num_form_submitters": 5,
           "page_timeout_ms": 90000,
           "element_wait_timeout_ms": 20000,
           "auto_concurrency": { "enabled": false }
         }
         JSON
 
-    # 6. Run your scraper
     - name: Run scraper
       run: python scraper.py
 
-    # 7. Persist logs & screenshots for debugging
-    - name: Upload artifacts
+    - name: Upload artifacts on failure or success
       if: always()
       uses: actions/upload-artifact@v4
       with:
@@ -91,4 +131,4 @@ jobs:
           output/
           app.log
           state.json
-        retention-days: 7          # auto-purge after a week
+        retention-days: 7
