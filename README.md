@@ -1,8 +1,21 @@
 # Amazon Seller Central Scraper
 
-This repository contains an asynchronous Playwright-based scraper for collecting metrics from Amazon Seller Central dashboards. The results are posted directly to a Google Form so they can be aggregated in Google Sheets.
+This repository contains an asynchronous scraper built with Playwright. It logs
+into Amazon Seller Central, collects dashboard metrics for a list of stores and
+submits them to a Google Form so they can be aggregated in Google Sheets.
 
-The code can be run locally or through the provided GitHub Actions workflow.
+The code may be executed locally or through the included GitHub Actions
+workflow.
+
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Local Setup](#local-setup)
+- [Running Locally](#running-locally)
+- [GitHub Actions Workflow](#github-actions-workflow)
+- [Configuration Reference](#configuration-reference)
+- [Notes](#notes)
 
 ## Features
 
@@ -18,12 +31,13 @@ The code can be run locally or through the provided GitHub Actions workflow.
 - Playwright with Chromium browsers
 - See `requirements.txt` for the full list of Python packages
 
-## Setup
+## Local Setup
 
 1. Install Python dependencies:
 
    ```bash
    pip install -r requirements.txt
+   python -m playwright install chromium
    ```
 
 2. Copy the example configuration and edit it with your credentials:
@@ -50,7 +64,14 @@ Logs and submission data will be saved under the `output/` directory.
 
 ## GitHub Actions Workflow
 
-The workflow defined in `.github/workflows/run-scraper.yml` installs dependencies, builds a `config.json` from repository secrets, and runs the scraper on a schedule. It checks the current UK time against `UK_TARGET_HOURS` to decide whether to proceed with a run.
+The workflow defined in `.github/workflows/run-scraper.yml` installs dependencies,
+creates a `config.json` from repository secrets and runs the scraper on a
+schedule. It checks the current UK time against `UK_TARGET_HOURS` to decide
+whether to proceed with a run.
+
+Secrets expected by the workflow include `FORM_URL`, `LOGIN_URL`, `SECRET_KEY`,
+`LOGIN_EMAIL`, `LOGIN_PASSWORD` and `OTP_SECRET_KEY`. These map to the fields in
+`config.example.json`.
 
 Artifacts such as logs are uploaded for each run and kept for seven days.
 
@@ -64,6 +85,10 @@ Key options from `config.example.json`:
 - `initial_concurrency` – number of concurrent browser workers
 - `num_form_submitters` – number of HTTP workers sending form data
 - `auto_concurrency` – optional automatic scaling of concurrency limits. When enabled, the scraper adjusts `concurrency_limit` between `min_concurrency` and `max_concurrency` based on CPU and memory load.
+- `chat_webhook_url` – optional Google Chat webhook to post progress messages
+- `schedule_times` – optional list of times (HH:MM) to run the scraper when using automation
+- `debug` – enable verbose logging and save extra screenshots
+- `max_concurrency` / `min_concurrency` – bounds for automatically adjusted concurrency
 
 See the example file for full details.
 
