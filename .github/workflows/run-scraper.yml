@@ -3,10 +3,10 @@ name: Run Playwright Scraper
 # ── TRIGGERS ────────────────────────────────────────────────────────────────
 on:
   workflow_dispatch:           # manual trigger
-  schedule:                    # three daily runs (UTC)
-    - cron: '0 9 * * *'        # 09:00
-    - cron: '30 23 * * *'      # 23:30
-    - cron: '45 5 * * *'       # 00:30  ── fixed "30 00" → "30 0"
+  schedule:                    # scheduled runs (times are in UTC)
+    - cron: '0 9 * * *'        # 09:00 UTC
+    - cron: '30 23 * * *'      # 23:30 UTC
+    - cron: '45 5 * * *'       # 05:45 UTC
 
 # Abort an older run of the same branch if a new one starts
 concurrency:
@@ -58,7 +58,9 @@ jobs:
         LOGIN_PASSWORD:  ${{ secrets.LOGIN_PASSWORD }}
         OTP_SECRET_KEY:  ${{ secrets.OTP_SECRET_KEY }}
       run: |
-        cat > config.json <<'JSON'
+        # THIS IS THE FIX: The delimiter 'JSON' is NOT in single quotes.
+        # This allows the shell to expand the environment variables like ${FORM_URL}.
+        cat > config.json <<JSON
         {
           "debug": false,
           "form_url":        "${FORM_URL}",
