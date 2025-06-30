@@ -24,7 +24,7 @@ import json
 import asyncio
 from asyncio import Queue
 from threading import Lock
-from typing import Dict, List
+from typing import Dict, List, Any
 import pyotp
 from logging.handlers import RotatingFileHandler
 import re
@@ -146,6 +146,7 @@ start_time    = None
 
 pending_chat_entries: List[Dict[str, str]] = []
 pending_chat_lock = asyncio.Lock()
+chat_batch_count = 0
 
 playwright = None
 browser = None
@@ -397,24 +398,56 @@ async def prime_master_session() -> bool:
 #######################################################################
 
 async def post_to_chat_webhook(entries: List[Dict[str, str]]):
-    """Send a card message to the configured Google Chat webhook."""
-    if not CHAT_WEBHOOK_URL:
+    """Send a detailed card message to the configured Google Chat webhook."""
+    if not CHAT_WEBHOOK_URL or not entries:
         return
     try:
-        sections = []
-        for entry in entries:
-            lines = [f"<b>{entry.get('store','')}</b>"]
-            for key, value in entry.items():
-                if key == 'store' or key == 'timestamp':
-                    continue
-                lines.append(f"{key}: {value}")
-            sections.append({"widgets": [{"textParagraph": {"text": "<br>".join(lines)}}]})
+        global chat_batch_count
+        chat_batch_count += 1
+        batch_header = datetime.now(LOCAL_TIMEZONE).strftime(
+            "%A %d %B, %H:%M"
+        )
+        header_text = f"{batch_header}  Batch {chat_batch_count} ({len(entries)} stores)"
+
+        widgets: List[Dict[str, Any]] = []
+        for i, entry in enumerate(entries):
+            store_name = entry.get("store", "Store")
+            first_line = f"Orders: {entry.get('orders', 'N/A')} | Units: {entry.get('units', 'N/A')}"
+            second_line = (
+                f"Fulfilled: {entry.get('fulfilled', 'N/A')} | UPH: {entry.get('uph', 'N/A')} |"
+                f" INF: {entry.get('inf', 'N/A')} | Found: {entry.get('found', 'N/A')}"
+            )
+            third_line = (
+                f"Cancelled: {entry.get('cancelled', 'N/A')} | Lates: {entry.get('lates', 'N/A')} |"
+                f" Time Available: {entry.get('time_available', 'N/A')}"
+            )
+
+            widgets.append(
+                {
+                    "decoratedText": {
+                        "icon": {"knownIcon": "SHOPPING_CART"},
+                        "topLabel": store_name,
+                        "text": first_line,
+                        "bottomLabel": second_line,
+                    }
+                }
+            )
+            widgets.append({"textParagraph": {"text": third_line}})
+            if i < len(entries) - 1:
+                widgets.append({"divider": {}})
+
+        batch_section = {
+            "header": header_text,
+            "collapsible": True,
+            "uncollapsibleWidgetsCount": 0,
+            "widgets": widgets,
+        }
 
         payload = {
             "cards": [
                 {
-                    "header": {"title": f"Seller Central Metrics ({len(entries)} stores)"},
-                    "sections": sections,
+                    "header": {"title": "Seller Central Metrics"},
+                    "sections": [batch_section],
                 }
             ]
         }
