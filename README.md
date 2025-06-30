@@ -95,4 +95,5 @@ See the example file for full details.
 ## Notes
 
 The repository excludes `config.json`, `state.json`, and `output/` from version control. These files may contain sensitive information or large log data. Ensure you keep your credentials secure.
+Timestamps recorded by the scraper default to the Europe/London timezone. Modify the `LOCAL_TIMEZONE` constant in `scraper.py` if you prefer a different local time.
 
