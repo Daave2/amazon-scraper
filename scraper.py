@@ -37,6 +37,17 @@ import ssl
 import certifi
 import io
 
+# Use UK timezone for log timestamps
+LOCAL_TIMEZONE = timezone('Europe/London')
+
+
+class LocalTimeFormatter(logging.Formatter):
+    """Formatter that converts timestamps to ``LOCAL_TIMEZONE``."""
+
+    def converter(self, ts: float):
+        dt = datetime.fromtimestamp(ts, LOCAL_TIMEZONE)
+        return dt.timetuple()
+
 #######################################################################
 #                             APP SETUP & LOGGING
 #######################################################################
@@ -50,7 +61,7 @@ def setup_logging():
     app_logger = logging.getLogger('app')
     app_logger.setLevel(logging.INFO)
     app_file = RotatingFileHandler('app.log', maxBytes=10**7, backupCount=5)
-    fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    fmt = LocalTimeFormatter('%(asctime)s %(levelname)s %(message)s')
     app_file.setFormatter(fmt)
     console = logging.StreamHandler()
     console.setFormatter(fmt)
@@ -63,8 +74,6 @@ app_logger = setup_logging()
 #######################################################################
 #                            CONFIG & CONSTANTS
 #######################################################################
-
-LOCAL_TIMEZONE = timezone('Europe/London')
 
 try:
     with open('config.json', 'r') as config_file:
