@@ -78,6 +78,7 @@ except json.JSONDecodeError:
 
 DEBUG_MODE      = config.get('debug', False)
 LOGIN_URL       = config['login_url']
+CHAT_WEBHOOK_URL = config.get('chat_webhook_url')
 
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
@@ -382,6 +383,26 @@ async def prime_master_session() -> bool:
 #                  OPTIMIZED ARCHITECTURE: WORKERS & LOGGING
 #######################################################################
 
+async def post_to_chat_webhook(data: Dict[str, str]):
+    """Send a JSON message to the configured Google Chat webhook."""
+    if not CHAT_WEBHOOK_URL:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            payload = {"text": json.dumps(data)}
+            async with session.post(CHAT_WEBHOOK_URL, json=payload) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    app_logger.error(
+                        f"Chat webhook post failed. Status: {resp.status}. Response: {error_text[:200]}"
+                    )
+    except Exception as e:
+        app_logger.error(f"Error posting to chat webhook: {e}", exc_info=DEBUG_MODE)
+
+
 async def log_submission(data: Dict[str,str]):
     """Write a submission entry to CSV and JSON logs.
 
@@ -411,6 +432,7 @@ async def log_submission(data: Dict[str,str]):
                 await f.write(json.dumps(log_entry) + '\n')
         except IOError as e:
             app_logger.error(f"Error writing to JSON log file {JSON_LOG_FILE}: {e}")
+        await post_to_chat_webhook(log_entry)
 
 async def http_form_submitter_worker(queue: Queue, worker_id: int):
     """Submit queued form data via HTTP.
