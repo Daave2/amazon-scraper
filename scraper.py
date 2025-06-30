@@ -68,8 +68,8 @@ FIELD_MAP = {
     'time_available': 'entry.1823671734',
 }
 
-INITIAL_CONCURRENCY = config.get('initial_concurrency', 8)
-NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 4)
+INITIAL_CONCURRENCY = config.get('initial_concurrency', 10)
+NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 2)
 
 LOG_FILE        = os.path.join('output', 'submissions.log')
 JSON_LOG_FILE   = os.path.join('output', 'submissions.jsonl')
