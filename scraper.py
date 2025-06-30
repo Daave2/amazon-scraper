@@ -162,7 +162,7 @@ async def _save_screenshot(page: Page | None, prefix: str):
         return
     try:
         safe_prefix = re.sub(r'[\\/*?:"<>|]', "_", prefix)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(LOCAL_TIMEZONE).strftime("%Y%m%d_%H%M%S")
         path = os.path.join(OUTPUT_DIR, f"{safe_prefix}_{timestamp}.png")
         await page.screenshot(path=path, full_page=True, timeout=15000)
         app_logger.info(f"Screenshot saved for debugging: {path}")
@@ -413,7 +413,7 @@ async def log_submission(data: Dict[str,str]):
         None
     """
     async with log_lock:
-        current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        current_timestamp = datetime.now(LOCAL_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
         log_entry = {'timestamp': current_timestamp, **data}
         fieldnames = ['timestamp','store','orders','units','fulfilled','uph','inf','found','cancelled','lates','time_available']
         new_csv = not os.path.exists(LOG_FILE)
@@ -462,7 +462,7 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
                         await log_submission(form_data)
                         with progress_lock:
                             progress["current"] += 1
-                            progress["lastUpdate"] = f"{datetime.now().strftime('%H:%M')} [Submitted] {store_name}"
+                            progress["lastUpdate"] = f"{datetime.now(LOCAL_TIMEZONE).strftime('%H:%M')} [Submitted] {store_name}"
                     else:
                         error_text = await resp.text()
                         app_logger.error(f"{log_prefix} Submission for {store_name} failed. Status: {resp.status}. Response: {error_text[:200]}")
@@ -680,7 +680,7 @@ async def process_urls():
         auto_task = asyncio.create_task(auto_concurrency_manager())
 
     with progress_lock: progress = {"current": 0, "total": len(urls_data), "lastUpdate": "N/A"}
-    start_time = datetime.now()
+    start_time = datetime.now(LOCAL_TIMEZONE)
 
     collector_tasks = [managed_worker(si, browser, storage_template, submission_queue) for si in urls_data]
     await asyncio.gather(*collector_tasks)
@@ -696,7 +696,7 @@ async def process_urls():
         auto_task.cancel()
         await asyncio.gather(auto_task, return_exceptions=True)
 
-    elapsed = (datetime.now() - start_time).total_seconds()
+    elapsed = (datetime.now(LOCAL_TIMEZONE) - start_time).total_seconds()
     app_logger.info(f"Processing finished. Processed {progress['current']}/{progress['total']} in {elapsed:.2f}s")
     if run_failures:
         app_logger.warning(f"Completed with {len(run_failures)} issue(s): {', '.join(run_failures)}")
