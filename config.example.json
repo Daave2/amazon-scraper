@@ -1,0 +1,27 @@
+{
+  "secret_key": "YOUR_SECRET_KEY",
+  "chat_webhook_url": "https://chat.googleapis.com/...",
+  "form_url": "https://docs.google.com/forms/.../viewform",
+  "login_url": "https://sellercentral.amazon.co.uk/ap/signin?...",
+  "login_email": "you@example.com",
+  "login_password": "your_password",
+  "otp_secret_key": "OTP_SECRET",
+  "max_concurrency": 30,
+  "min_concurrency": 1,
+  "initial_concurrency": 15,
+  "num_form_submitters": 5,
+  "marketplace_id": "YOUR_MARKETPLACE_ID",
+  "target_url": "https://sellercentral.amazon.co.uk/snowdash?...",
+  "debug": false,
+  "schedule_times": ["10:00", "16:00", "19:00"],
+  "auto_concurrency": {
+    "enabled": true,
+    "min_concurrency": 1,
+    "max_concurrency": 50,
+    "cpu_upper_threshold": 90,
+    "cpu_lower_threshold": 65,
+    "mem_upper_threshold": 90,
+    "check_interval_seconds": 5,
+    "cooldown_seconds": 15
+  }
+}
