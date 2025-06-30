@@ -1,8 +1,8 @@
 # =======================================================================================
 #               AMAZON SELLER CENTRAL SCRAPER (CI/CD / COMMAND-LINE VERSION)
 # =======================================================================================
-# This version is optimized with direct HTTP form submission and corrected 'lates' selector.
-# It includes robust login handling with retries.
+# This version is optimized with direct HTTP form submission and robust,
+# patient scraping logic for dynamically loaded content.
 # =======================================================================================
 
 import logging
@@ -160,8 +160,6 @@ def load_default_data():
     except FileNotFoundError:
         app_logger.error("FATAL: 'urls.csv' not found. Please ensure the file exists and is named correctly (all lowercase).")
         raise
-    except StopIteration:
-        app_logger.error("Failed to load urls.csv: File is empty or has no header.")
     except Exception:
         app_logger.exception("An error occurred while loading urls.csv")
 
@@ -185,14 +183,10 @@ async def check_if_login_needed(page: Page, test_url: str) -> bool:
         response = await page.goto(test_url, timeout=PAGE_TIMEOUT, wait_until="load")
         await page.wait_for_timeout(3000)
         current_url = page.url
-        app_logger.debug(f"URL after navigation check: {current_url}")
-
         if "signin" in current_url.lower() or "/ap/" in current_url:
             return True
-
         if response and not response.ok:
             return True
-
         dashboard_element_selector = "#content > div > div.mainAppContainerExternal > div.css-6pahkd.action-bar-container > div > div.filterbar-right-slot > kat-button:nth-child(2) > button"
         await expect(page.locator(dashboard_element_selector)).to_be_visible(timeout=WAIT_TIMEOUT)
         app_logger.info("Session check successful.")
@@ -363,22 +357,33 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
             # --- UPDATED LATES SCRAPING LOGIC ---
             formatted_lates = "0 %"
             try:
-                # Target the second row within the table's head section.
+                # Step 1: Locate the target row and cell.
                 header_second_row = page.locator("kat-table-head kat-table-row").nth(1)
-                
-                # Target the 11th cell (index 10) in that specific row.
                 lates_cell = header_second_row.locator("kat-table-cell").nth(10)
 
-                cell_text = (await lates_cell.inner_text() or "").strip()
+                # Step 2: CRUCIAL FIX - Explicitly wait for the cell to be visible.
+                # This ensures we don't try to read the value before it's populated by JavaScript.
+                await expect(lates_cell).to_be_visible(timeout=10000)
 
+                # Step 3: Get the text from the cell and add a log for debugging.
+                # This will show us exactly what the script sees in every run.
+                cell_text = (await lates_cell.text_content() or "").strip()
+                app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
+
+                # Step 4: Validate the text format.
                 if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
                     formatted_lates = cell_text
-                elif cell_text:
+                    app_logger.info(f"[{store_name}] Successfully parsed 'Lates' as: {formatted_lates}")
+                elif cell_text: # If we got text but it wasn't the right format.
                     app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
+                else: # If the cell was empty after waiting.
+                    app_logger.warning(f"[{store_name}] 'Lates' cell was visible but empty, defaulting to 0 %.")
+
             except TimeoutError:
-                app_logger.warning(f"[{store_name}] Timed out waiting for 'Lates' data in table header, defaulting to 0 %.")
+                # This will now only trigger if the cell *never* becomes visible.
+                app_logger.warning(f"[{store_name}] Timed out waiting for the 'Lates' cell to become visible, defaulting to 0 %.")
             except Exception as e:
-                app_logger.warning(f"[{store_name}] Unexpected error scraping 'Lates': {e} – defaulting to 0 %")
+                app_logger.error(f"[{store_name}] An unexpected error occurred while scraping 'Lates': {e}", exc_info=DEBUG_MODE)
             # --- END OF UPDATED LATES LOGIC ---
 
             milliseconds_from_api = float(api_data.get('TimeAvailable_V2', 0.0))
