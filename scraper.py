@@ -38,6 +38,24 @@ import certifi
 import io
 
 #######################################################################
+#                             APP SETUP & LOGGING
+#######################################################################
+
+def setup_logging():
+    app_logger = logging.getLogger('app')
+    app_logger.setLevel(logging.INFO)
+    app_file = RotatingFileHandler('app.log', maxBytes=10**7, backupCount=5)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    app_file.setFormatter(fmt)
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    app_logger.addHandler(app_file)
+    app_logger.addHandler(console)
+    return app_logger
+
+app_logger = setup_logging()
+
+#######################################################################
 #                            CONFIG & CONSTANTS
 #######################################################################
 
@@ -47,10 +65,10 @@ try:
     with open('config.json', 'r') as config_file:
         config = json.load(config_file)
 except FileNotFoundError:
-    print("FATAL: config.json not found. Please create it before running.")
+    app_logger.critical("config.json not found. Please create it before running.")
     exit(1)
 except json.JSONDecodeError:
-    print("FATAL: config.json is not valid JSON. Please fix it.")
+    app_logger.critical("config.json is not valid JSON. Please fix it.")
     exit(1)
 
 DEBUG_MODE      = config.get('debug', False)
@@ -98,24 +116,6 @@ RESOURCE_BLOCKLIST = [
     "google-analytics.com", "googletagmanager.com", "doubleclick.net",
     "adservice.google.com", "facebook.net", "fbcdn.net", "analytics.tiktok.com",
 ]
-
-#######################################################################
-#                             APP SETUP & LOGGING
-#######################################################################
-
-def setup_logging():
-    app_logger = logging.getLogger('app')
-    app_logger.setLevel(logging.INFO)
-    app_file = RotatingFileHandler('app.log', maxBytes=10**7, backupCount=5)
-    fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-    app_file.setFormatter(fmt)
-    console = logging.StreamHandler()
-    console.setFormatter(fmt)
-    app_logger.addHandler(app_file)
-    app_logger.addHandler(console)
-    return app_logger
-
-app_logger = setup_logging()
 
 #######################################################################
 #                      GLOBALS
