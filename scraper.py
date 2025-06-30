@@ -42,6 +42,11 @@ import io
 #######################################################################
 
 def setup_logging():
+    """Configure application logging to file and console.
+
+    Returns:
+        Logger: Configured logger instance used throughout the app.
+    """
     app_logger = logging.getLogger('app')
     app_logger.setLevel(logging.INFO)
     app_file = RotatingFileHandler('app.log', maxBytes=10**7, backupCount=5)
@@ -142,6 +147,15 @@ last_concurrency_change = 0.0
 #######################################################################
 
 async def _save_screenshot(page: Page | None, prefix: str):
+    """Save a full-page screenshot for debugging purposes.
+
+    Args:
+        page (Page | None): Playwright page to capture.
+        prefix (str): Prefix used when naming the screenshot file.
+
+    Returns:
+        None
+    """
     if not page or page.is_closed():
         app_logger.warning(f"Cannot save screenshot '{prefix}': Page is closed or unavailable.")
         return
@@ -155,6 +169,11 @@ async def _save_screenshot(page: Page | None, prefix: str):
         app_logger.error(f"Failed to save screenshot with prefix '{prefix}': {e}")
 
 def load_default_data():
+    """Load store details from ``urls.csv`` into ``urls_data``.
+
+    Returns:
+        None
+    """
     global urls_data
     urls_data.clear()
     try:
@@ -178,11 +197,22 @@ def load_default_data():
         app_logger.exception("An error occurred while loading urls.csv")
 
 def ensure_storage_state():
-    if not os.path.exists(STORAGE_STATE) or os.path.getsize(STORAGE_STATE)==0:
+    """Validate that ``state.json`` exists and contains cookies.
+
+    Returns:
+        bool: ``True`` if the saved state is usable, ``False`` otherwise.
+    """
+    if not os.path.exists(STORAGE_STATE) or os.path.getsize(STORAGE_STATE) == 0:
         return False
     try:
-        with open(STORAGE_STATE) as f: data=json.load(f)
-        if (not isinstance(data, dict) or "cookies" not in data or not isinstance(data["cookies"], list) or not data["cookies"]):
+        with open(STORAGE_STATE) as f:
+            data = json.load(f)
+        if (
+            not isinstance(data, dict)
+            or "cookies" not in data
+            or not isinstance(data["cookies"], list)
+            or not data["cookies"]
+        ):
             return False
         return True
     except json.JSONDecodeError:
@@ -232,6 +262,15 @@ async def auto_concurrency_manager():
 #                     AUTHENTICATION & SESSION PRIMING
 #######################################################################
 async def check_if_login_needed(page: Page, test_url: str) -> bool:
+    """Check whether the current session is authenticated.
+
+    Args:
+        page (Page): Page used to perform the check.
+        test_url (str): URL expected to load when logged in.
+
+    Returns:
+        bool: ``True`` if a login is required, ``False`` otherwise.
+    """
     app_logger.info(f"Verifying session status by navigating to: {test_url}")
     try:
         response = await page.goto(test_url, timeout=PAGE_TIMEOUT, wait_until="load")
@@ -313,6 +352,11 @@ async def perform_login_and_otp(page: Page) -> bool:
         return False
 
 async def prime_master_session() -> bool:
+    """Authenticate once and persist the storage state for workers.
+
+    Returns:
+        bool: ``True`` if login succeeds and state is saved, ``False`` otherwise.
+    """
     global browser
     app_logger.info("Priming master session")
     ctx = None
@@ -339,6 +383,14 @@ async def prime_master_session() -> bool:
 #######################################################################
 
 async def log_submission(data: Dict[str,str]):
+    """Write a submission entry to CSV and JSON logs.
+
+    Args:
+        data (Dict[str, str]): Form fields that were sent to Google Forms.
+
+    Returns:
+        None
+    """
     async with log_lock:
         current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_entry = {'timestamp': current_timestamp, **data}
@@ -361,6 +413,15 @@ async def log_submission(data: Dict[str,str]):
             app_logger.error(f"Error writing to JSON log file {JSON_LOG_FILE}: {e}")
 
 async def http_form_submitter_worker(queue: Queue, worker_id: int):
+    """Submit queued form data via HTTP.
+
+    Args:
+        queue (Queue): Queue containing form dictionaries to submit.
+        worker_id (int): Identifier used for logging output.
+
+    Returns:
+        None
+    """
     log_prefix = f"[HTTP-Submitter-{worker_id}]"
     app_logger.info(f"{log_prefix} Starting up...")
     timeout = aiohttp.ClientTimeout(total=20)
@@ -507,6 +568,17 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
 #######################################################################
 
 async def managed_worker(store_item: Dict, browser: Browser, storage_template: Dict, queue: Queue):
+    """Run a single data collector while respecting the concurrency limit.
+
+    Args:
+        store_item (Dict): Details for the store being processed.
+        browser (Browser): Shared browser instance.
+        storage_template (Dict): Authentication state template.
+        queue (Queue): Queue where collected metrics are enqueued.
+
+    Returns:
+        None
+    """
     global active_workers_count
     await asyncio.sleep(random.uniform(0.1, 1.0))
     async with concurrency_condition:
@@ -520,6 +592,11 @@ async def managed_worker(store_item: Dict, browser: Browser, storage_template: D
             concurrency_condition.notify()
 
 async def process_urls():
+    """Main orchestration routine for scraping and submission.
+
+    Returns:
+        None
+    """
     global progress, start_time, run_failures, browser
     app_logger.info(f"Job 'process_urls' started with collector concurrency limit of {concurrency_limit}.")
     run_failures = []
@@ -609,6 +686,11 @@ async def process_urls():
 #######################################################################
 
 async def main():
+    """Entry point for running the scraper from the command line.
+
+    Returns:
+        None
+    """
     global playwright, browser
     app_logger.info("Starting up in single-run mode...")
     try:
