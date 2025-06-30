@@ -24,7 +24,7 @@ workflow.
 - Posts metrics to a configurable Google Form
 - Supports configurable concurrency and automatic adjustments based on system load
 - Produces structured logs in `output/` and rotates `app.log`
-- Optionally posts progress to Google Chat using collapsible cards grouped by timestamped batches, with each store in its own collapsible section
+- Optionally posts progress to Google Chat using collapsible cards grouped by timestamped batches. Store names are alphabetized and the standard "Morrisons -" prefix is trimmed for readability. Each store section now highlights metrics in bold bullet lists for a cleaner look.
 
 ## Requirements
 
@@ -87,7 +87,7 @@ Key options from `config.example.json`:
 - `num_form_submitters` – number of HTTP workers sending form data
 - `auto_concurrency` – optional automatic scaling of concurrency limits. When enabled, the scraper adjusts `concurrency_limit` between `min_concurrency` and `max_concurrency` based on CPU and memory load.
 - `chat_webhook_url` – optional Google Chat webhook to post progress messages. When configured, results are grouped into timestamped cards with per-store collapsible sections
-- `chat_batch_size` – how many store results to group into a single chat card (default: 25)
+- `chat_batch_size` – how many store results to group into a single chat card (default: 100)
 - `schedule_times` – optional list of times (HH:MM) to run the scraper when using automation
 - `debug` – enable verbose logging and save extra screenshots
 - `max_concurrency` / `min_concurrency` – bounds for automatically adjusted concurrency

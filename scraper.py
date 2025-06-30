@@ -89,6 +89,16 @@ DEBUG_MODE      = config.get('debug', False)
 LOGIN_URL       = config['login_url']
 CHAT_WEBHOOK_URL = config.get('chat_webhook_url')
 CHAT_BATCH_SIZE  = config.get('chat_batch_size', 100)
+STORE_PREFIX_RE  = re.compile(r"^morrisons\s*-\s*", re.I)
+BULLET           = " \u2022 "
+
+def sanitize_store_name(name: str) -> str:
+    """Trim standard prefix from store names for chat display."""
+    return STORE_PREFIX_RE.sub("", name).strip()
+
+def build_metric_line(pairs: List[tuple]) -> str:
+    """Return metrics formatted as bold bullet-separated pairs."""
+    return BULLET.join(f"*{label}:* {value}" for label, value in pairs)
 
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
@@ -410,38 +420,54 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
         header_text = f"{batch_header}  Batch {chat_batch_count} ({len(entries)} stores)"
 
         sections: List[Dict[str, Any]] = []
-        for entry in entries:
+        sorted_entries = sorted(
+            entries,
+            key=lambda e: sanitize_store_name(e.get("store", ""))
+        )
+        for entry in sorted_entries:
             store_name = entry.get("store", "Store")
-            first_line = f"Orders: {entry.get('orders', 'N/A')} | Units: {entry.get('units', 'N/A')}"
-            second_line = (
-                f"Fulfilled: {entry.get('fulfilled', 'N/A')} | UPH: {entry.get('uph', 'N/A')} |"
-                f" INF: {entry.get('inf', 'N/A')} | Found: {entry.get('found', 'N/A')}"
-            )
-            third_line = (
-                f"Cancelled: {entry.get('cancelled', 'N/A')} | Lates: {entry.get('lates', 'N/A')} |"
-                f" Time Available: {entry.get('time_available', 'N/A')}"
-            )
+            display_name = sanitize_store_name(store_name)
 
-            header = (
-                f"{store_name} - INF: {entry.get('inf', 'N/A')} | "
-                f"Lates: {entry.get('lates', 'N/A')} | UPH: {entry.get('uph', 'N/A')}"
-            )
+            first_line = build_metric_line([
+                ("Orders", entry.get("orders", "N/A")),
+                ("Units", entry.get("units", "N/A")),
+                ("Fulfilled", entry.get("fulfilled", "N/A")),
+            ])
+            second_line = build_metric_line([
+                ("UPH", entry.get("uph", "N/A")),
+                ("INF", entry.get("inf", "N/A")),
+                ("Found", entry.get("found", "N/A")),
+            ])
+            third_line = build_metric_line([
+                ("Cancelled", entry.get("cancelled", "N/A")),
+                ("Lates", entry.get("lates", "N/A")),
+                ("Avail", entry.get("time_available", "N/A")),
+            ])
 
             widgets = [
                 {
                     "decoratedText": {
                         "icon": {"knownIcon": "SHOPPING_CART"},
-                        "topLabel": store_name,
                         "text": first_line,
-                        "bottomLabel": second_line,
                     }
                 },
-                {"textParagraph": {"text": third_line}},
+                {
+                    "decoratedText": {
+                        "icon": {"knownIcon": "CHECK_CIRCLE"},
+                        "text": second_line,
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "icon": {"knownIcon": "TIMER"},
+                        "text": third_line,
+                    }
+                },
             ]
 
             sections.append(
                 {
-                    "header": header,
+                    "header": display_name,
                     "collapsible": True,
                     "uncollapsibleWidgetsCount": 0,
                     "widgets": widgets,
