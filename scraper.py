@@ -70,13 +70,13 @@ FIELD_MAP = {
     'time_available': 'entry.1823671734',
 }
 
-INITIAL_CONCURRENCY = config.get('initial_concurrency', 10)
+INITIAL_CONCURRENCY = config.get('initial_concurrency', 5)
 NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 2)
 
 AUTO_CONF = config.get('auto_concurrency', {})
 AUTO_ENABLED = AUTO_CONF.get('enabled', False)
 AUTO_MIN_CONCURRENCY = AUTO_CONF.get('min_concurrency', config.get('min_concurrency', 1))
-AUTO_MAX_CONCURRENCY = AUTO_CONF.get('max_concurrency', config.get('max_concurrency', INITIAL_CONCURRENCY))
+AUTO_MAX_CONCURRENCY = AUTO_CONF.get('max_concurrency', config.get('max_concurrency', 35))
 CPU_UPPER_THRESHOLD = AUTO_CONF.get('cpu_upper_threshold', 90)
 CPU_LOWER_THRESHOLD = AUTO_CONF.get('cpu_lower_threshold', 65)
 MEM_UPPER_THRESHOLD = AUTO_CONF.get('mem_upper_threshold', 90)
