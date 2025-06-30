@@ -1,6 +1,7 @@
 {
   "secret_key": "YOUR_SECRET_KEY",
   "chat_webhook_url": "https://chat.googleapis.com/...",
+  "chat_batch_size": 25,
   "form_url": "https://docs.google.com/forms/.../viewform",
   "login_url": "https://sellercentral.amazon.co.uk/ap/signin?...",
   "login_email": "you@example.com",
