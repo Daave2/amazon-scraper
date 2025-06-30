@@ -64,6 +64,7 @@ Key options from `config.example.json`:
 - `initial_concurrency` – number of concurrent browser workers
 - `num_form_submitters` – number of HTTP workers sending form data
 - `auto_concurrency` – optional automatic scaling of concurrency limits. When enabled, the scraper adjusts `concurrency_limit` between `min_concurrency` and `max_concurrency` based on CPU and memory load.
+- The example configuration starts with 5 workers and caps concurrency at 35.
 
 See the example file for full details.
 
