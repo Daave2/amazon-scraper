@@ -1,8 +1,8 @@
 # =======================================================================================
 #               AMAZON SELLER CENTRAL SCRAPER (CI/CD / COMMAND-LINE VERSION)
 # =======================================================================================
-# This version is optimized with direct HTTP form submission for maximum speed
-# and reliability. It includes robust login handling with retries.
+# This version is optimized with direct HTTP form submission and corrected 'lates' selector.
+# It includes robust login handling with retries.
 # =======================================================================================
 
 import logging
@@ -31,7 +31,6 @@ import re
 import psutil
 import random
 
-# --- NEW IMPORTS for HTTP Submission ---
 import aiohttp
 import ssl
 import certifi
@@ -55,11 +54,8 @@ except json.JSONDecodeError:
 DEBUG_MODE      = config.get('debug', False)
 LOGIN_URL       = config['login_url']
 
-# --- NEW: FORM SUBMISSION CONSTANTS ---
-# These values are taken directly from the example app you provided.
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
-    # Internal Key -> Google Form entry.<id>
     'store':          'entry.117918617',
     'orders':         'entry.128719511',
     'units':          'entry.66444552',
@@ -73,7 +69,6 @@ FIELD_MAP = {
 }
 
 INITIAL_CONCURRENCY = config.get('initial_concurrency', 8)
-# A smaller pool of submitters is sufficient for fast HTTP requests.
 NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 4)
 
 LOG_FILE        = os.path.join('output', 'submissions.log')
@@ -193,27 +188,17 @@ async def check_if_login_needed(page: Page, test_url: str) -> bool:
         app_logger.debug(f"URL after navigation check: {current_url}")
 
         if "signin" in current_url.lower() or "/ap/" in current_url:
-            app_logger.warning("Session check failed: Redirected to a login page.")
             return True
 
         if response and not response.ok:
-            app_logger.warning(f"Session check failed: Navigation returned non-OK status: {response.status}.")
             return True
 
         dashboard_element_selector = "#content > div > div.mainAppContainerExternal > div.css-6pahkd.action-bar-container > div > div.filterbar-right-slot > kat-button:nth-child(2) > button"
-        try:
-            dashboard_element = page.locator(dashboard_element_selector)
-            await expect(dashboard_element).to_be_visible(timeout=WAIT_TIMEOUT)
-            app_logger.info("Session check successful: Found key dashboard element.")
-            return False
-        except TimeoutError:
-            app_logger.warning("Session check failed: Key dashboard element was not found.")
-            await _save_screenshot(page, "login_check_fail_no_element")
-            return True
-
+        await expect(page.locator(dashboard_element_selector)).to_be_visible(timeout=WAIT_TIMEOUT)
+        app_logger.info("Session check successful.")
+        return False
     except Exception as e:
-        app_logger.error(f"Unexpected error during session check: {e}", exc_info=DEBUG_MODE)
-        await _save_screenshot(page, "login_check_fail_unexpected")
+        app_logger.error(f"Error during session check: {e}", exc_info=DEBUG_MODE)
         return True
 
 async def perform_login_and_otp(page: Page) -> bool:
@@ -225,13 +210,8 @@ async def perform_login_and_otp(page: Page) -> bool:
         continue_shopping_selector = 'button:has-text("Continue shopping")'
         email_field_selector = 'input#ap_email'
 
-        await page.wait_for_selector(
-            f"{continue_shopping_selector}, {email_field_selector}",
-            state="visible",
-            timeout=15000
-        )
-        app_logger.info("Initial login element found. Proceeding with appropriate flow.")
-
+        await page.wait_for_selector(f"{continue_shopping_selector}, {email_field_selector}", state="visible", timeout=15000)
+        
         if await page.locator(continue_shopping_selector).is_visible():
             app_logger.info("Flow: Interstitial 'Continue shopping' page detected. Clicking it.")
             await page.locator(continue_shopping_selector).click()
@@ -242,49 +222,26 @@ async def perform_login_and_otp(page: Page) -> bool:
         await page.get_by_label("Email or mobile phone number").fill(config['login_email'])
         await page.get_by_label("Continue").click()
 
-        app_logger.info("Waiting for password field...")
         password_field = page.get_by_label("Password")
         await expect(password_field).to_be_visible(timeout=10000)
         await password_field.fill(config['login_password'])
-        
-        app_logger.info("Password entered. Clicking Sign-in and waiting for navigation...")
         await page.get_by_label("Sign in").click()
         
-        app_logger.info("Waiting for page to settle after sign-in...")
         otp_selector = 'input[id*="otp"]'
         dashboard_selector = "#content > div > div.mainAppContainerExternal"
         await page.wait_for_selector(f"{otp_selector}, {dashboard_selector}", timeout=30000)
-        app_logger.info("Page has settled. Checking for OTP requirement...")
 
         otp_field = page.locator(otp_selector)
         if await otp_field.is_visible():
             app_logger.info("Two-Step Verification (OTP) is required.")
-            if not config.get('otp_secret_key'):
-                app_logger.error("OTP is required, but 'otp_secret_key' is not configured.")
-                await _save_screenshot(page, "login_fail_otp_no_key")
-                return False
-                
             otp_code = pyotp.TOTP(config['otp_secret_key']).now()
             await otp_field.fill(otp_code)
-            
-            remember_device_checkbox = page.locator("input[type='checkbox'][name='rememberDevice']")
-            if await remember_device_checkbox.is_visible():
-                app_logger.info("Checking 'Don't require OTP on this browser' checkbox.")
-                await remember_device_checkbox.check()
-            
+            if await page.locator("input[type='checkbox'][name='rememberDevice']").is_visible():
+                await page.locator("input[type='checkbox'][name='rememberDevice']").check()
             await page.get_by_role("button", name="Sign in").click()
-            app_logger.info("OTP submitted.")
-        else:
-            app_logger.info("OTP not required. Logged in directly.")
 
-        app_logger.info("Verifying successful login by looking for dashboard OR account picker page...")
         account_picker_selector = 'h1:has-text("Select an account")'
         await page.wait_for_selector(f"{dashboard_selector}, {account_picker_selector}", timeout=30000)
-
-        if "signin" in page.url.lower() or "/ap/" in page.url:
-            app_logger.error("Login failed: Ended up on a sign-in page unexpectedly.")
-            await _save_screenshot(page, "login_fail_final_check")
-            return False
         
         app_logger.info("Login process appears fully successful.")
         return True
@@ -335,7 +292,6 @@ def log_submission(data: Dict[str,str]):
             with open(JSON_LOG_FILE, 'a', encoding='utf-8') as f: f.write(json.dumps(log_entry) + '\n')
         except IOError as e: app_logger.error(f"Error writing to JSON log file {JSON_LOG_FILE}: {e}")
 
-# --- NEW: HTTP-based form submitter ---
 async def http_form_submitter_worker(queue: Queue, worker_id: int):
     log_prefix = f"[HTTP-Submitter-{worker_id}]"
     app_logger.info(f"{log_prefix} Starting up...")
@@ -349,9 +305,7 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
             try:
                 form_data = await queue.get()
                 store_name = form_data.get('store', 'Unknown')
-
                 payload = {FIELD_MAP[key]: value for key, value in form_data.items() if key in FIELD_MAP}
-
                 async with session.post(FORM_POST_URL, data=payload) as resp:
                     if resp.status == 200:
                         log_submission(form_data)
@@ -362,7 +316,6 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
                         error_text = await resp.text()
                         app_logger.error(f"{log_prefix} Submission for {store_name} failed. Status: {resp.status}. Response: {error_text[:200]}")
                         run_failures.append(f"{store_name} (HTTP Submit Fail {resp.status})")
-
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -372,7 +325,6 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
             finally:
                 if form_data:
                     queue.task_done()
-    
     app_logger.info(f"{log_prefix} Shut down.")
 
 async def data_collector_worker(browser: Browser, store_info: Dict[str,str], storage_template: Dict, queue: Queue):
@@ -408,16 +360,26 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
                 await refresh_button.click()
             api_data = await (await resp_info.value).json()
 
+            # --- UPDATED LATES SCRAPING LOGIC ---
             formatted_lates = "0 %"
             try:
-                body_first_row = page.locator("#content kat-table kat-table-body kat-table-row").first
-                await body_first_row.wait_for(state="attached", timeout=WAIT_TIMEOUT)
-                lates_cell = body_first_row.locator("kat-table-cell").nth(10)
-                cell_text  = (await lates_cell.text_content() or "").strip()
+                # Target the second row within the table's head section.
+                header_second_row = page.locator("kat-table-head kat-table-row").nth(1)
+                
+                # Target the 11th cell (index 10) in that specific row.
+                lates_cell = header_second_row.locator("kat-table-cell").nth(10)
+
+                cell_text = (await lates_cell.inner_text() or "").strip()
+
                 if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
                     formatted_lates = cell_text
-            except Exception:
-                app_logger.warning(f"[{store_name}] Could not scrape 'Lates' data, defaulting to 0 %")
+                elif cell_text:
+                    app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
+            except TimeoutError:
+                app_logger.warning(f"[{store_name}] Timed out waiting for 'Lates' data in table header, defaulting to 0 %.")
+            except Exception as e:
+                app_logger.warning(f"[{store_name}] Unexpected error scraping 'Lates': {e} – defaulting to 0 %")
+            # --- END OF UPDATED LATES LOGIC ---
 
             milliseconds_from_api = float(api_data.get('TimeAvailable_V2', 0.0))
             total_seconds = int(milliseconds_from_api / 1000)
@@ -512,7 +474,6 @@ async def process_urls():
     with open(STORAGE_STATE) as f: storage_template = json.load(f)
     submission_queue = Queue()
 
-    # --- UPDATED: Start the new HTTP workers ---
     app_logger.info(f"Starting {NUM_FORM_SUBMITTERS} HTTP form submitter worker(s).")
     form_submitter_tasks = [
         asyncio.create_task(http_form_submitter_worker(submission_queue, i + 1))
