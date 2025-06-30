@@ -41,6 +41,12 @@ jobs:
       - name: Check current UK hour against target hours
         id: check_hour
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger detected. The main job will run."
+            echo "run_job=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Get the current hour in London timezone (e.g., "09", "10", "17")
           CURRENT_UK_HOUR=$(TZ="Europe/London" date +'%k' | xargs)
 
