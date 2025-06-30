@@ -117,6 +117,18 @@ def setup_logging():
 
 app_logger = setup_logging()
 
+def log_concurrency_settings():
+    auto_status = "enabled" if AUTO_ENABLED else "disabled"
+    app_logger.info(
+        "Concurrency settings: initial=%s, min=%s, max=%s, auto %s",
+        INITIAL_CONCURRENCY,
+        AUTO_MIN_CONCURRENCY,
+        AUTO_MAX_CONCURRENCY,
+        auto_status,
+    )
+
+log_concurrency_settings()
+
 #######################################################################
 #                      GLOBALS
 #######################################################################
