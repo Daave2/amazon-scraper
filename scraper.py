@@ -1,9 +1,8 @@
 # =======================================================================================
 #               AMAZON SELLER CENTRAL SCRAPER (CI/CD / COMMAND-LINE VERSION)
 # =======================================================================================
-# This version is optimized for automated environments like GitHub Actions.
-# It includes resilient, multi-flow login handling for all known page variations.
-# It runs the core data collection and submission process once, then exits.
+# This version is optimized with direct HTTP form submission for maximum speed
+# and reliability. It includes robust login handling with retries.
 # =======================================================================================
 
 import logging
@@ -32,6 +31,11 @@ import re
 import psutil
 import random
 
+# --- NEW IMPORTS for HTTP Submission ---
+import aiohttp
+import ssl
+import certifi
+
 #######################################################################
 #                            CONFIG & CONSTANTS
 #######################################################################
@@ -49,10 +53,27 @@ except json.JSONDecodeError:
     exit(1)
 
 DEBUG_MODE      = config.get('debug', False)
-FORM_URL        = config['form_url']
 LOGIN_URL       = config['login_url']
 
+# --- NEW: FORM SUBMISSION CONSTANTS ---
+# These values are taken directly from the example app you provided.
+FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
+FIELD_MAP = {
+    # Internal Key -> Google Form entry.<id>
+    'store':          'entry.117918617',
+    'orders':         'entry.128719511',
+    'units':          'entry.66444552',
+    'fulfilled':      'entry.2093280675',
+    'uph':            'entry.316694141',
+    'inf':            'entry.909185879',
+    'found':          'entry.637588300',
+    'cancelled':      'entry.1775576921',
+    'lates':          'entry.2130893076',
+    'time_available': 'entry.1823671734',
+}
+
 INITIAL_CONCURRENCY = config.get('initial_concurrency', 8)
+# A smaller pool of submitters is sufficient for fast HTTP requests.
 NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 4)
 
 LOG_FILE        = os.path.join('output', 'submissions.log')
@@ -173,27 +194,27 @@ async def check_if_login_needed(page: Page, test_url: str) -> bool:
 
         if "signin" in current_url.lower() or "/ap/" in current_url:
             app_logger.warning("Session check failed: Redirected to a login page.")
-            return True # LOGIN NEEDED
+            return True
 
         if response and not response.ok:
             app_logger.warning(f"Session check failed: Navigation returned non-OK status: {response.status}.")
-            return True # LOGIN NEEDED
+            return True
 
         dashboard_element_selector = "#content > div > div.mainAppContainerExternal > div.css-6pahkd.action-bar-container > div > div.filterbar-right-slot > kat-button:nth-child(2) > button"
         try:
             dashboard_element = page.locator(dashboard_element_selector)
             await expect(dashboard_element).to_be_visible(timeout=WAIT_TIMEOUT)
             app_logger.info("Session check successful: Found key dashboard element.")
-            return False # LOGIN NOT NEEDED
+            return False
         except TimeoutError:
             app_logger.warning("Session check failed: Key dashboard element was not found.")
             await _save_screenshot(page, "login_check_fail_no_element")
-            return True # LOGIN NEEDED
+            return True
 
     except Exception as e:
         app_logger.error(f"Unexpected error during session check: {e}", exc_info=DEBUG_MODE)
         await _save_screenshot(page, "login_check_fail_unexpected")
-        return True # LOGIN NEEDED
+        return True
 
 async def perform_login_and_otp(page: Page) -> bool:
     app_logger.info(f"Navigating to login page: {LOGIN_URL}")
@@ -201,13 +222,9 @@ async def perform_login_and_otp(page: Page) -> bool:
         await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT, wait_until="load")
         app_logger.info("Initial page loaded. Determining login flow...")
 
-        # --- THIS IS THE NEW, MULTI-OUTCOME LOGIC ---
-        # Define selectors for all possible starting pages after initial navigation.
         continue_shopping_selector = 'button:has-text("Continue shopping")'
-        email_field_selector = 'input#ap_email' # A stable selector for the email field
+        email_field_selector = 'input#ap_email'
 
-        # Wait for EITHER the continue button OR the email field to appear.
-        # This makes the script resilient to different login page variations.
         await page.wait_for_selector(
             f"{continue_shopping_selector}, {email_field_selector}",
             state="visible",
@@ -215,16 +232,13 @@ async def perform_login_and_otp(page: Page) -> bool:
         )
         app_logger.info("Initial login element found. Proceeding with appropriate flow.")
 
-        # Now, check which element we found and act accordingly.
         if await page.locator(continue_shopping_selector).is_visible():
             app_logger.info("Flow: Interstitial 'Continue shopping' page detected. Clicking it.")
             await page.locator(continue_shopping_selector).click()
-            # After clicking, we must wait for the email field to appear.
             await expect(page.locator(email_field_selector)).to_be_visible(timeout=15000)
         else:
             app_logger.info("Flow: Login form with email field loaded directly.")
         
-        # --- FROM HERE, THE REST OF THE LOGIN PROCESS IS THE SAME ---
         await page.get_by_label("Email or mobile phone number").fill(config['login_email'])
         await page.get_by_label("Continue").click()
 
@@ -279,7 +293,6 @@ async def perform_login_and_otp(page: Page) -> bool:
         await _save_screenshot(page, "login_critical_failure")
         return False
 
-
 async def prime_master_session() -> bool:
     global browser
     app_logger.info("Priming master session")
@@ -322,50 +335,49 @@ def log_submission(data: Dict[str,str]):
             with open(JSON_LOG_FILE, 'a', encoding='utf-8') as f: f.write(json.dumps(log_entry) + '\n')
         except IOError as e: app_logger.error(f"Error writing to JSON log file {JSON_LOG_FILE}: {e}")
 
-async def form_submitter_worker(queue: Queue, storage_template: Dict, worker_id: int):
-    log_prefix = f"[FormSubmitter-{worker_id}]"
+# --- NEW: HTTP-based form submitter ---
+async def http_form_submitter_worker(queue: Queue, worker_id: int):
+    log_prefix = f"[HTTP-Submitter-{worker_id}]"
     app_logger.info(f"{log_prefix} Starting up...")
-    ctx: BrowserContext = None
-    page: Page = None
-    try:
-        ctx = await browser.new_context(storage_state=storage_template)
-        page = await ctx.new_page()
+    timeout = aiohttp.ClientTimeout(total=20)
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         while True:
             form_data = None
             try:
                 form_data = await queue.get()
                 store_name = form_data.get('store', 'Unknown')
-                await page.goto(FORM_URL, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
-                labels = {
-                    'store': "Field 2", 'orders': "Field 3", 'units': "Field 4", 'fulfilled': "Field 5",
-                    'uph': "Field 6", 'inf': "Field 7", 'found': "Field 8", 'cancelled': "Field 9",
-                    'lates': "Field 10", 'time_available': "Field 12"
-                }
-                for key, label in labels.items():
-                    await page.get_by_label(label, exact=True).fill(form_data.get(key, ""))
-                await page.get_by_label("Submit", exact=True).click()
-                await expect(page.locator("text='Your response has been recorded.'")).to_be_visible(timeout=WAIT_TIMEOUT)
-                log_submission(form_data)
-                with progress_lock:
-                    progress["current"] += 1
-                    progress["lastUpdate"] = f"{datetime.now().strftime('%H:%M')} [Submitted] {store_name}"
+
+                payload = {FIELD_MAP[key]: value for key, value in form_data.items() if key in FIELD_MAP}
+
+                async with session.post(FORM_POST_URL, data=payload) as resp:
+                    if resp.status == 200:
+                        log_submission(form_data)
+                        with progress_lock:
+                            progress["current"] += 1
+                            progress["lastUpdate"] = f"{datetime.now().strftime('%H:%M')} [Submitted] {store_name}"
+                    else:
+                        error_text = await resp.text()
+                        app_logger.error(f"{log_prefix} Submission for {store_name} failed. Status: {resp.status}. Response: {error_text[:200]}")
+                        run_failures.append(f"{store_name} (HTTP Submit Fail {resp.status})")
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 failed_store = form_data.get('store', 'Unknown') if form_data else "Unknown"
-                app_logger.error(f"{log_prefix} Error submitting for {failed_store}: {e}", exc_info=DEBUG_MODE)
-                run_failures.append(f"{failed_store} (Submit Fail)")
+                app_logger.error(f"{log_prefix} Unhandled exception for {failed_store}: {e}", exc_info=DEBUG_MODE)
+                run_failures.append(f"{failed_store} (Submit Exception)")
             finally:
-                if form_data: queue.task_done()
-    finally:
-        if page and not page.is_closed(): await page.close()
-        if ctx: await ctx.close()
-        app_logger.info(f"{log_prefix} Shut down.")
+                if form_data:
+                    queue.task_done()
+    
+    app_logger.info(f"{log_prefix} Shut down.")
 
 async def data_collector_worker(browser: Browser, store_info: Dict[str,str], storage_template: Dict, queue: Queue):
     merchant_id = store_info['merchant_id']
     store_name  = store_info['store_name']
-
     for attempt in range(WORKER_RETRY_COUNT):
         ctx: BrowserContext = None
         try:
@@ -378,7 +390,6 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
             ctx  = await browser.new_context(storage_state=storage_template)
             ctx.set_default_navigation_timeout(PAGE_TIMEOUT)
             ctx.set_default_timeout(ACTION_TIMEOUT)
-
             async def block_resources(route):
                 if (any(domain in route.request.url for domain in RESOURCE_BLOCKLIST) or
                         route.request.resource_type in ("image", "stylesheet", "font", "media")):
@@ -386,14 +397,10 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
                 else:
                     await route.continue_()
             await ctx.route("**/*", block_resources)
-
             page = await ctx.new_page()
-
             dash_url = f"https://sellercentral.amazon.co.uk/snowdash?ref_=mp_home_logo_xx&cor=mmp_EU&mons_sel_dir_mcid={merchant_id}&mons_sel_mkid={marketplace_id}"
             await page.goto(dash_url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
-
             refresh_button_selector = "#content > div > div.mainAppContainerExternal > div.css-6pahkd.action-bar-container > div > div.filterbar-right-slot > kat-button:nth-child(2) > button"
-
             METRICS_TIMEOUT = 40_000
             async with page.expect_response(lambda r: "summationMetrics" in r.url and r.status == 200, timeout=METRICS_TIMEOUT) as resp_info:
                 refresh_button = page.locator(refresh_button_selector)
@@ -425,11 +432,9 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
                 'found': f"{api_data.get('ItemFoundRate_V2', 0.0):.1f} %", 'cancelled': str(api_data.get('ShortedUnits_V2', 0)),
                 'lates': formatted_lates, 'time_available': formatted_time_available
             }
-
             await queue.put(form_data)
             app_logger.info(f"[{store_name}] Data collection complete. Added to submission queue.")
             return
-
         except Exception as e:
             app_logger.warning(f"Data Collector for {store_name} failed on attempt {attempt + 1}: {e}", exc_info=False)
             if attempt < WORKER_RETRY_COUNT - 1: await asyncio.sleep(2)
@@ -457,8 +462,7 @@ async def managed_worker(store_item: Dict, browser: Browser, storage_template: D
             concurrency_condition.notify()
 
 async def process_urls():
-    global progress, start_time, run_failures, browser, active_workers_count
-
+    global progress, start_time, run_failures, browser
     app_logger.info(f"Job 'process_urls' started with collector concurrency limit of {concurrency_limit}.")
     run_failures = []
     
@@ -490,18 +494,28 @@ async def process_urls():
         app_logger.info("No existing auth state file found. Login is required.")
 
     if login_is_required:
-        app_logger.info("Attempting to prime a new master session...")
-        if not await prime_master_session():
-            app_logger.error("Critical: Session priming failed. Aborting job.")
+        MAX_LOGIN_ATTEMPTS = 3
+        login_successful = False
+        for attempt in range(MAX_LOGIN_ATTEMPTS):
+            app_logger.info(f"Attempting to prime a new master session (Attempt {attempt + 1}/{MAX_LOGIN_ATTEMPTS})...")
+            if await prime_master_session():
+                login_successful = True
+                break
+            if attempt < MAX_LOGIN_ATTEMPTS - 1:
+                app_logger.warning(f"Session priming failed on attempt {attempt + 1}. Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+        
+        if not login_successful:
+            app_logger.critical(f"Critical: Session priming failed after {MAX_LOGIN_ATTEMPTS} attempts. Aborting job.")
             return
 
-    async with concurrency_condition: active_workers_count = 0
     with open(STORAGE_STATE) as f: storage_template = json.load(f)
     submission_queue = Queue()
 
-    app_logger.info(f"Starting {NUM_FORM_SUBMITTERS} form submitter worker(s).")
+    # --- UPDATED: Start the new HTTP workers ---
+    app_logger.info(f"Starting {NUM_FORM_SUBMITTERS} HTTP form submitter worker(s).")
     form_submitter_tasks = [
-        asyncio.create_task(form_submitter_worker(submission_queue, storage_template, i+1))
+        asyncio.create_task(http_form_submitter_worker(submission_queue, i + 1))
         for i in range(NUM_FORM_SUBMITTERS)
     ]
 
@@ -513,7 +527,7 @@ async def process_urls():
 
     app_logger.info("All data collectors finished. Waiting for submission queue to empty...")
     await submission_queue.join()
-
+    
     app_logger.info("Cancelling form submitter workers...")
     for task in form_submitter_tasks: task.cancel()
     await asyncio.gather(*form_submitter_tasks, return_exceptions=True)
@@ -530,21 +544,13 @@ async def process_urls():
 #######################################################################
 
 async def main():
-    """
-    Main function to orchestrate the entire scraping process for a single run.
-    """
     global playwright, browser
     app_logger.info("Starting up in single-run mode...")
-
     try:
         playwright = await async_playwright().start()
-        # For CI/CD environments like GitHub Actions, headless must be True.
-        # For local debugging, you can set it to False in your config.json.
         browser = await playwright.chromium.launch(headless=not DEBUG_MODE)
         app_logger.info("Browser launched successfully.")
-        
         await process_urls()
-
     except Exception as e:
         app_logger.critical(f"A critical error occurred in the main execution block: {e}", exc_info=True)
     finally:
