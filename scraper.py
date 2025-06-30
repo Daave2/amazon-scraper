@@ -24,7 +24,7 @@ import json
 import asyncio
 from asyncio import Queue
 from threading import Lock
-from typing import Dict
+from typing import Dict, List
 import pyotp
 from logging.handlers import RotatingFileHandler
 import re
@@ -88,6 +88,7 @@ except json.JSONDecodeError:
 DEBUG_MODE      = config.get('debug', False)
 LOGIN_URL       = config['login_url']
 CHAT_WEBHOOK_URL = config.get('chat_webhook_url')
+CHAT_BATCH_SIZE  = config.get('chat_batch_size', 25)
 
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
@@ -142,6 +143,9 @@ urls_data     = []
 progress      = {"current": 0, "total": 0, "lastUpdate": "N/A"}
 run_failures  = []
 start_time    = None
+
+pending_chat_entries: List[Dict[str, str]] = []
+pending_chat_lock = asyncio.Lock()
 
 playwright = None
 browser = None
@@ -392,16 +396,32 @@ async def prime_master_session() -> bool:
 #                  OPTIMIZED ARCHITECTURE: WORKERS & LOGGING
 #######################################################################
 
-async def post_to_chat_webhook(data: Dict[str, str]):
-    """Send a JSON message to the configured Google Chat webhook."""
+async def post_to_chat_webhook(entries: List[Dict[str, str]]):
+    """Send a card message to the configured Google Chat webhook."""
     if not CHAT_WEBHOOK_URL:
         return
     try:
+        sections = []
+        for entry in entries:
+            lines = [f"<b>{entry.get('store','')}</b>"]
+            for key, value in entry.items():
+                if key == 'store' or key == 'timestamp':
+                    continue
+                lines.append(f"{key}: {value}")
+            sections.append({"widgets": [{"textParagraph": {"text": "<br>".join(lines)}}]})
+
+        payload = {
+            "cards": [
+                {
+                    "header": {"title": f"Seller Central Metrics ({len(entries)} stores)"},
+                    "sections": sections,
+                }
+            ]
+        }
         timeout = aiohttp.ClientTimeout(total=20)
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_context)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-            payload = {"text": json.dumps(data)}
             async with session.post(CHAT_WEBHOOK_URL, json=payload) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -410,6 +430,29 @@ async def post_to_chat_webhook(data: Dict[str, str]):
                     )
     except Exception as e:
         app_logger.error(f"Error posting to chat webhook: {e}", exc_info=DEBUG_MODE)
+
+
+async def add_to_pending_chat(entry: Dict[str, str]):
+    """Accumulate chat entries and send in batches."""
+    if not CHAT_WEBHOOK_URL:
+        return
+    async with pending_chat_lock:
+        pending_chat_entries.append(entry)
+        if len(pending_chat_entries) >= CHAT_BATCH_SIZE:
+            entries_to_send = pending_chat_entries[:CHAT_BATCH_SIZE]
+            del pending_chat_entries[:CHAT_BATCH_SIZE]
+            await post_to_chat_webhook(entries_to_send)
+
+
+async def flush_pending_chat_entries():
+    """Send any remaining chat entries."""
+    if not CHAT_WEBHOOK_URL:
+        return
+    async with pending_chat_lock:
+        if pending_chat_entries:
+            entries = pending_chat_entries[:]
+            pending_chat_entries.clear()
+            await post_to_chat_webhook(entries)
 
 
 async def log_submission(data: Dict[str,str]):
@@ -441,7 +484,7 @@ async def log_submission(data: Dict[str,str]):
                 await f.write(json.dumps(log_entry) + '\n')
         except IOError as e:
             app_logger.error(f"Error writing to JSON log file {JSON_LOG_FILE}: {e}")
-        await post_to_chat_webhook(log_entry)
+        await add_to_pending_chat(log_entry)
 
 async def http_form_submitter_worker(queue: Queue, worker_id: int):
     """Submit queued form data via HTTP.
@@ -696,6 +739,7 @@ async def process_urls():
 
     app_logger.info("All data collectors finished. Waiting for submission queue to empty...")
     await submission_queue.join()
+    await flush_pending_chat_entries()
     
     app_logger.info("Cancelling form submitter workers...")
     for task in form_submitter_tasks: task.cancel()
@@ -739,6 +783,7 @@ async def main():
         if playwright:
             await playwright.stop()
             app_logger.info("Playwright stopped.")
+        await flush_pending_chat_entries()
         app_logger.info("Run complete.")
 
 if __name__ == "__main__":
