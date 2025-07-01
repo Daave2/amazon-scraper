@@ -92,21 +92,13 @@ CHAT_BATCH_SIZE  = config.get('chat_batch_size', 100)
 STORE_PREFIX_RE  = re.compile(r"^morrisons\s*-\s*", re.I)
 BULLET           = " \u2022 "
 
-# --- NEW: Constants for color-coding ---
-COLOR_GREEN = "#36a64f"
-COLOR_RED = "#db4437"
-UPH_THRESHOLD = 80
-LATES_THRESHOLD = 3.0
-INF_THRESHOLD = 2.0
-# --- END NEW ---
-
 def sanitize_store_name(name: str) -> str:
     """Trim standard prefix from store names for chat display."""
     return STORE_PREFIX_RE.sub("", name).strip()
 
 def build_metric_line(pairs: List[tuple]) -> str:
     """Return metrics formatted as bold bullet-separated pairs."""
-    return BULLET.join(f"<b>{label}:</b> {value}" for label, value in pairs)
+    return BULLET.join(f"*{label}:* {value}" for label, value in pairs)
 
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
@@ -415,24 +407,6 @@ async def prime_master_session() -> bool:
 #                  OPTIMIZED ARCHITECTURE: WORKERS & LOGGING
 #######################################################################
 
-# --- NEW: Helper functions for color-coding metrics ---
-def _format_metric_with_color(value_str: str, threshold: float, is_uph: bool = False) -> str:
-    """Applies green/red color formatting to a metric string based on a threshold."""
-    try:
-        # Clean the string to get a number
-        numeric_value = float(re.sub(r'[^\d.]', '', value_str))
-        
-        # Determine color based on comparison type
-        is_good = (numeric_value >= threshold) if is_uph else (numeric_value <= threshold)
-        color = COLOR_GREEN if is_good else COLOR_RED
-        
-        return f'<font color="{color}">{value_str}</font>'
-    except (ValueError, TypeError):
-        # If value is not a number (e.g., "N/A"), return as is
-        return value_str
-
-# --- END NEW ---
-
 async def post_to_chat_webhook(entries: List[Dict[str, str]]):
     """Send a detailed, table-formatted card message to the Google Chat webhook."""
     if not CHAT_WEBHOOK_URL or not entries:
@@ -440,60 +414,72 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
     try:
         global chat_batch_count
         chat_batch_count += 1
-        batch_header_text = datetime.now(LOCAL_TIMEZONE).strftime("%A %d %B, %H:%M")
+        batch_header_text = datetime.now(LOCAL_TIMEZONE).strftime(
+            "%A %d %B, %H:%M"
+        )
         card_subtitle = f"{batch_header_text}  Batch {chat_batch_count} ({len(entries)} stores)"
 
-        sorted_entries = sorted(entries, key=lambda e: sanitize_store_name(e.get("store", "")))
+        # Sort entries alphabetically by sanitized store name for all sections
+        sorted_entries = sorted(
+            entries,
+            key=lambda e: sanitize_store_name(e.get("store", ""))
+        )
 
-        # --- 1. Build the Grid/Table Widget with Color-Coding ---
+        # --- 1. Build the Grid/Table Widget for Key Metrics ---
+        # The grid widget requires a flat list of items. We add headers first, then each row's cells.
         grid_items = [
-            # Header Row - Plain text as grid titles don't support bold
-            {"title": "Store", "textAlignment": "START"},
-            {"title": "UPH", "textAlignment": "CENTER"},
-            {"title": "Lates", "textAlignment": "CENTER"},
-            {"title": "INF", "textAlignment": "CENTER"},
+            # Header Row - Using bold markdown-style formatting
+            {"title": "*Store*", "textAlignment": "START"},
+            {"title": "*UPH*", "textAlignment": "CENTER"},
+            {"title": "*Lates*", "textAlignment": "CENTER"},
+            {"title": "*INF*", "textAlignment": "CENTER"},
         ]
 
+        # Add a row for each store with the key metrics
         for entry in sorted_entries:
-            # Get raw values or provide defaults
-            uph_val = entry.get("uph", "N/A")
-            lates_val = entry.get("lates", "0.0 %") or "0.0 %"
-            inf_val = entry.get("inf", "0.0 %") or "0.0 %"
-
-            # Apply color formatting using helper functions
-            formatted_uph = _format_metric_with_color(uph_val, UPH_THRESHOLD, is_uph=True)
-            formatted_lates = _format_metric_with_color(lates_val, LATES_THRESHOLD)
-            formatted_inf = _format_metric_with_color(inf_val, INF_THRESHOLD)
+            # Clean up values for a neater display in the table
+            uph = entry.get("uph", "N/A")
+            # Ensure "Lates" and "INF" always have a value and consistent spacing
+            lates = (entry.get("lates", "0.0 %") or "0.0 %").replace(" %", "%")
+            inf = (entry.get("inf", "0.0 %") or "0.0 %").replace(" %", "%")
 
             grid_items.extend([
                 {"title": sanitize_store_name(entry.get("store", "N/A")), "textAlignment": "START"},
-                {"title": formatted_uph, "textAlignment": "CENTER"},
-                {"title": formatted_lates, "textAlignment": "CENTER"},
-                {"title": formatted_inf, "textAlignment": "CENTER"},
+                {"title": uph, "textAlignment": "CENTER"},
+                {"title": lates, "textAlignment": "CENTER"},
+                {"title": inf, "textAlignment": "CENTER"},
             ])
         
+        # This is the section that contains the grid widget.
         table_section = {
             "header": "Key Performance Indicators",
-            "collapsible": False,
+            "collapsible": False, # Keep the main table visible
             "uncollapsibleWidgetsCount": 1,
             "widgets": [{
                 "grid": {
                     "title": "Performance Summary",
-                    "columnCount": 4,
-                    "borderStyle": {"type": "STROKE", "cornerRadius": 4},
+                    "columnCount": 4, # As defined by our headers
+                    "borderStyle": {
+                        "type": "STROKE",
+                        "cornerRadius": 4
+                    },
                     "items": grid_items
                 }
             }]
         }
 
-        # --- 2. Build the full-detail collapsible widgets ---
+        # --- 2. Build the original full-detail collapsible widgets ---
+        # This provides a more compact way to show the full details upon expansion.
         detail_widgets = []
         for entry in sorted_entries:
+            # Consolidate all metrics into a single 'decoratedText' widget per store
+            # using HTML line breaks for structure. This is more efficient.
             full_details_text = (
                 f'{build_metric_line([("Orders", entry.get("orders", "N/A")), ("Units", entry.get("units", "N/A")), ("Fulfilled", entry.get("fulfilled", "N/A"))])}<br>'
                 f'{build_metric_line([("UPH", entry.get("uph", "N/A")), ("INF", entry.get("inf", "N/A")), ("Found", entry.get("found", "N/A"))])}<br>'
                 f'{build_metric_line([("Cancelled", entry.get("cancelled", "N/A")), ("Lates", entry.get("lates", "N/A")), ("Avail", entry.get("time_available", "N/A"))])}'
             )
+
             detail_widgets.append({
                 "decoratedText": {
                     "topLabel": sanitize_store_name(entry.get("store", "Store")),
@@ -502,14 +488,15 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
                 }
             })
         
+        # This section contains the full details list and is collapsible.
         details_section = {
             "header": "Full Details (All Stores)",
             "collapsible": True,
-            "uncollapsibleWidgetsCount": 0,
+            "uncollapsibleWidgetsCount": 0, # Hide all widgets until expanded
             "widgets": detail_widgets
         }
 
-        # --- 3. Assemble the final payload ---
+        # --- 3. Assemble the final payload with both the table and the details ---
         payload = {
             "cardsV2": [{
                 "cardId": f"batch-summary-{chat_batch_count}",
@@ -517,9 +504,10 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
                     "header": {
                         "title": "Seller Central Metrics Report",
                         "subtitle": card_subtitle,
-                        "imageUrl": "https://i.imgur.com/u0e3d2x.png",
+                        "imageUrl": "https://i.imgur.com/u0e3d2x.png", # Amazon 'a' logo
                         "imageType": "CIRCLE"
                     },
+                    # The sections are rendered in order. Table first, then details.
                     "sections": [table_section, details_section],
                 },
             }]
