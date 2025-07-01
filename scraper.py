@@ -92,13 +92,21 @@ CHAT_BATCH_SIZE  = config.get('chat_batch_size', 100)
 STORE_PREFIX_RE  = re.compile(r"^morrisons\s*-\s*", re.I)
 BULLET           = " \u2022 "
 
+# --- NEW: Constants for color-coding ---
+COLOR_GREEN = "#36a64f"
+COLOR_RED = "#db4437"
+UPH_THRESHOLD = 80
+LATES_THRESHOLD = 3.0
+INF_THRESHOLD = 2.0
+# --- END NEW ---
+
 def sanitize_store_name(name: str) -> str:
     """Trim standard prefix from store names for chat display."""
     return STORE_PREFIX_RE.sub("", name).strip()
 
 def build_metric_line(pairs: List[tuple]) -> str:
     """Return metrics formatted as bold bullet-separated pairs."""
-    return BULLET.join(f"*{label}:* {value}" for label, value in pairs)
+    return BULLET.join(f"<b>{label}:</b> {value}" for label, value in pairs)
 
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
@@ -407,87 +415,116 @@ async def prime_master_session() -> bool:
 #                  OPTIMIZED ARCHITECTURE: WORKERS & LOGGING
 #######################################################################
 
+# --- NEW: Helper functions for color-coding metrics ---
+def _format_metric_with_color(value_str: str, threshold: float, is_uph: bool = False) -> str:
+    """Applies green/red color formatting to a metric string based on a threshold."""
+    try:
+        # Clean the string to get a number
+        numeric_value = float(re.sub(r'[^\d.]', '', value_str))
+        
+        # Determine color based on comparison type
+        is_good = (numeric_value >= threshold) if is_uph else (numeric_value <= threshold)
+        color = COLOR_GREEN if is_good else COLOR_RED
+        
+        return f'<font color="{color}">{value_str}</font>'
+    except (ValueError, TypeError):
+        # If value is not a number (e.g., "N/A"), return as is
+        return value_str
+
+# --- END NEW ---
+
 async def post_to_chat_webhook(entries: List[Dict[str, str]]):
-    """Send a detailed card message to the configured Google Chat webhook."""
+    """Send a detailed, table-formatted card message to the Google Chat webhook."""
     if not CHAT_WEBHOOK_URL or not entries:
         return
     try:
         global chat_batch_count
         chat_batch_count += 1
-        batch_header = datetime.now(LOCAL_TIMEZONE).strftime(
-            "%A %d %B, %H:%M"
-        )
-        header_text = f"{batch_header}  Batch {chat_batch_count} ({len(entries)} stores)"
+        batch_header_text = datetime.now(LOCAL_TIMEZONE).strftime("%A %d %B, %H:%M")
+        card_subtitle = f"{batch_header_text}  Batch {chat_batch_count} ({len(entries)} stores)"
 
-        sections: List[Dict[str, Any]] = []
-        sorted_entries = sorted(
-            entries,
-            key=lambda e: sanitize_store_name(e.get("store", ""))
-        )
+        sorted_entries = sorted(entries, key=lambda e: sanitize_store_name(e.get("store", "")))
+
+        # --- 1. Build the Grid/Table Widget with Color-Coding ---
+        grid_items = [
+            # Header Row - Plain text as grid titles don't support bold
+            {"title": "Store", "textAlignment": "START"},
+            {"title": "UPH", "textAlignment": "CENTER"},
+            {"title": "Lates", "textAlignment": "CENTER"},
+            {"title": "INF", "textAlignment": "CENTER"},
+        ]
+
         for entry in sorted_entries:
-            store_name = entry.get("store", "Store")
-            display_name = sanitize_store_name(store_name)
+            # Get raw values or provide defaults
+            uph_val = entry.get("uph", "N/A")
+            lates_val = entry.get("lates", "0.0 %") or "0.0 %"
+            inf_val = entry.get("inf", "0.0 %") or "0.0 %"
 
-            first_line = build_metric_line([
-                ("Orders", entry.get("orders", "N/A")),
-                ("Units", entry.get("units", "N/A")),
-                ("Fulfilled", entry.get("fulfilled", "N/A")),
-            ])
-            second_line = build_metric_line([
-                ("UPH", entry.get("uph", "N/A")),
-                ("INF", entry.get("inf", "N/A")),
-                ("Found", entry.get("found", "N/A")),
-            ])
-            third_line = build_metric_line([
-                ("Cancelled", entry.get("cancelled", "N/A")),
-                ("Lates", entry.get("lates", "N/A")),
-                ("Avail", entry.get("time_available", "N/A")),
-            ])
+            # Apply color formatting using helper functions
+            formatted_uph = _format_metric_with_color(uph_val, UPH_THRESHOLD, is_uph=True)
+            formatted_lates = _format_metric_with_color(lates_val, LATES_THRESHOLD)
+            formatted_inf = _format_metric_with_color(inf_val, INF_THRESHOLD)
 
-            widgets = [
-                {
-                    "decoratedText": {
-                        "icon": {"knownIcon": "SHOPPING_CART"},
-                        "text": first_line,
-                    }
-                },
-                {
-                    "decoratedText": {
-                        "icon": {"knownIcon": "CHECK_CIRCLE"},
-                        "text": second_line,
-                    }
-                },
-                {
-                    "decoratedText": {
-                        "icon": {"knownIcon": "TIMER"},
-                        "text": third_line,
-                    }
-                },
-            ]
-
-            sections.append(
-                {
-                    "header": display_name,
-                    "collapsible": True,
-                    "uncollapsibleWidgetsCount": 0,
-                    "widgets": widgets,
+            grid_items.extend([
+                {"title": sanitize_store_name(entry.get("store", "N/A")), "textAlignment": "START"},
+                {"title": formatted_uph, "textAlignment": "CENTER"},
+                {"title": formatted_lates, "textAlignment": "CENTER"},
+                {"title": formatted_inf, "textAlignment": "CENTER"},
+            ])
+        
+        table_section = {
+            "header": "Key Performance Indicators",
+            "collapsible": False,
+            "uncollapsibleWidgetsCount": 1,
+            "widgets": [{
+                "grid": {
+                    "title": "Performance Summary",
+                    "columnCount": 4,
+                    "borderStyle": {"type": "STROKE", "cornerRadius": 4},
+                    "items": grid_items
                 }
-            )
-
-        payload = {
-            "cardsV2": [
-                {
-                    "cardId": f"batch-{chat_batch_count}",
-                    "card": {
-                        "header": {
-                            "title": "Seller Central Metrics",
-                            "subtitle": header_text,
-                        },
-                        "sections": sections,
-                    },
-                }
-            ]
+            }]
         }
+
+        # --- 2. Build the full-detail collapsible widgets ---
+        detail_widgets = []
+        for entry in sorted_entries:
+            full_details_text = (
+                f'{build_metric_line([("Orders", entry.get("orders", "N/A")), ("Units", entry.get("units", "N/A")), ("Fulfilled", entry.get("fulfilled", "N/A"))])}<br>'
+                f'{build_metric_line([("UPH", entry.get("uph", "N/A")), ("INF", entry.get("inf", "N/A")), ("Found", entry.get("found", "N/A"))])}<br>'
+                f'{build_metric_line([("Cancelled", entry.get("cancelled", "N/A")), ("Lates", entry.get("lates", "N/A")), ("Avail", entry.get("time_available", "N/A"))])}'
+            )
+            detail_widgets.append({
+                "decoratedText": {
+                    "topLabel": sanitize_store_name(entry.get("store", "Store")),
+                    "startIcon": {"knownIcon": "STORE"},
+                    "text": full_details_text
+                }
+            })
+        
+        details_section = {
+            "header": "Full Details (All Stores)",
+            "collapsible": True,
+            "uncollapsibleWidgetsCount": 0,
+            "widgets": detail_widgets
+        }
+
+        # --- 3. Assemble the final payload ---
+        payload = {
+            "cardsV2": [{
+                "cardId": f"batch-summary-{chat_batch_count}",
+                "card": {
+                    "header": {
+                        "title": "Seller Central Metrics Report",
+                        "subtitle": card_subtitle,
+                        "imageUrl": "https://i.imgur.com/u0e3d2x.png",
+                        "imageType": "CIRCLE"
+                    },
+                    "sections": [table_section, details_section],
+                },
+            }]
+        }
+        
         timeout = aiohttp.ClientTimeout(total=20)
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_context)
@@ -496,7 +533,7 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
                 if resp.status != 200:
                     error_text = await resp.text()
                     app_logger.error(
-                        f"Chat webhook post failed. Status: {resp.status}. Response: {error_text[:200]}"
+                        f"Chat webhook post failed. Status: {resp.status}. Response: {error_text}"
                     )
     except Exception as e:
         app_logger.error(f"Error posting to chat webhook: {e}", exc_info=DEBUG_MODE)
