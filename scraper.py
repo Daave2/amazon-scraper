@@ -90,15 +90,17 @@ LOGIN_URL       = config['login_url']
 CHAT_WEBHOOK_URL = config.get('chat_webhook_url')
 CHAT_BATCH_SIZE  = config.get('chat_batch_size', 100)
 STORE_PREFIX_RE  = re.compile(r"^morrisons\s*-\s*", re.I)
-BULLET           = " \u2022 "
+
+# --- Constants for target-based emojis ---
+EMOJI_GREEN_CHECK = "\u2705" # ✅
+EMOJI_RED_CROSS = "\u274C"   # ❌
+UPH_THRESHOLD = 80
+LATES_THRESHOLD = 3.0
+INF_THRESHOLD = 2.0
 
 def sanitize_store_name(name: str) -> str:
     """Trim standard prefix from store names for chat display."""
     return STORE_PREFIX_RE.sub("", name).strip()
-
-def build_metric_line(pairs: List[tuple]) -> str:
-    """Return metrics formatted as bold bullet-separated pairs."""
-    return BULLET.join(f"*{label}:* {value}" for label, value in pairs)
 
 FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
 FIELD_MAP = {
@@ -172,15 +174,6 @@ last_concurrency_change = 0.0
 #######################################################################
 
 async def _save_screenshot(page: Page | None, prefix: str):
-    """Save a full-page screenshot for debugging purposes.
-
-    Args:
-        page (Page | None): Playwright page to capture.
-        prefix (str): Prefix used when naming the screenshot file.
-
-    Returns:
-        None
-    """
     if not page or page.is_closed():
         app_logger.warning(f"Cannot save screenshot '{prefix}': Page is closed or unavailable.")
         return
@@ -194,11 +187,6 @@ async def _save_screenshot(page: Page | None, prefix: str):
         app_logger.error(f"Failed to save screenshot with prefix '{prefix}': {e}")
 
 def load_default_data():
-    """Load store details from ``urls.csv`` into ``urls_data``.
-
-    Returns:
-        None
-    """
     global urls_data
     urls_data.clear()
     try:
@@ -222,11 +210,6 @@ def load_default_data():
         app_logger.exception("An error occurred while loading urls.csv")
 
 def ensure_storage_state():
-    """Validate that ``state.json`` exists and contains cookies.
-
-    Returns:
-        bool: ``True`` if the saved state is usable, ``False`` otherwise.
-    """
     if not os.path.exists(STORAGE_STATE) or os.path.getsize(STORAGE_STATE) == 0:
         return False
     try:
@@ -244,14 +227,6 @@ def ensure_storage_state():
         return False
 
 async def auto_concurrency_manager():
-    """Dynamically adjust worker concurrency based on system load.
-
-    The manager periodically checks CPU and memory usage and raises or lowers
-    the global ``concurrency_limit`` within the range configured in
-    ``config.json``. Updates are throttled by ``COOLDOWN_SECONDS`` to avoid
-    rapid fluctuations. All waiting workers are notified when the limit
-    changes.
-    """
     global concurrency_limit, last_concurrency_change
     if not AUTO_ENABLED:
         return
@@ -287,15 +262,6 @@ async def auto_concurrency_manager():
 #                     AUTHENTICATION & SESSION PRIMING
 #######################################################################
 async def check_if_login_needed(page: Page, test_url: str) -> bool:
-    """Check whether the current session is authenticated.
-
-    Args:
-        page (Page): Page used to perform the check.
-        test_url (str): URL expected to load when logged in.
-
-    Returns:
-        bool: ``True`` if a login is required, ``False`` otherwise.
-    """
     app_logger.info(f"Verifying session status by navigating to: {test_url}")
     try:
         response = await page.goto(test_url, timeout=PAGE_TIMEOUT, wait_until="load")
@@ -314,20 +280,6 @@ async def check_if_login_needed(page: Page, test_url: str) -> bool:
         return True
 
 async def perform_login_and_otp(page: Page) -> bool:
-    """Log in to Seller Central and handle OTP if prompted.
-
-    This routine navigates to the login page, fills in the credentials from the
-    configuration file and, if two-factor authentication is enabled, submits the
-    current TOTP value. When the dashboard or account picker page becomes
-    visible the function returns ``True``. Any unexpected issue results in a
-    screenshot and ``False`` is returned.
-
-    Args:
-        page (Page): Playwright page instance used for the login flow.
-
-    Returns:
-        bool: ``True`` on a successful login, ``False`` otherwise.
-    """
     app_logger.info(f"Navigating to login page: {LOGIN_URL}")
     try:
         await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT, wait_until="load")
@@ -377,11 +329,6 @@ async def perform_login_and_otp(page: Page) -> bool:
         return False
 
 async def prime_master_session() -> bool:
-    """Authenticate once and persist the storage state for workers.
-
-    Returns:
-        bool: ``True`` if login succeeds and state is saved, ``False`` otherwise.
-    """
     global browser
     app_logger.info("Priming master session")
     ctx = None
@@ -407,96 +354,66 @@ async def prime_master_session() -> bool:
 #                  OPTIMIZED ARCHITECTURE: WORKERS & LOGGING
 #######################################################################
 
+def _format_metric_with_emoji(value_str: str, threshold: float, is_uph: bool = False) -> str:
+    """Applies a pass/fail emoji to a metric string based on a threshold."""
+    try:
+        numeric_value = float(re.sub(r'[^\d.]', '', value_str))
+        is_good = (numeric_value >= threshold) if is_uph else (numeric_value <= threshold)
+        emoji = EMOJI_GREEN_CHECK if is_good else EMOJI_RED_CROSS
+        return f"{emoji} {value_str}"
+    except (ValueError, TypeError):
+        return value_str # Return as is if not a number
+
 async def post_to_chat_webhook(entries: List[Dict[str, str]]):
-    """Send a detailed, table-formatted card message to the Google Chat webhook."""
+    """Send a table-formatted card message with emoji indicators."""
     if not CHAT_WEBHOOK_URL or not entries:
         return
     try:
         global chat_batch_count
         chat_batch_count += 1
-        batch_header_text = datetime.now(LOCAL_TIMEZONE).strftime(
-            "%A %d %B, %H:%M"
-        )
+        batch_header_text = datetime.now(LOCAL_TIMEZONE).strftime("%A %d %B, %H:%M")
         card_subtitle = f"{batch_header_text}  Batch {chat_batch_count} ({len(entries)} stores)"
 
-        # Sort entries alphabetically by sanitized store name for all sections
-        sorted_entries = sorted(
-            entries,
-            key=lambda e: sanitize_store_name(e.get("store", ""))
-        )
+        sorted_entries = sorted(entries, key=lambda e: sanitize_store_name(e.get("store", "")))
 
-        # --- 1. Build the Grid/Table Widget for Key Metrics ---
-        # The grid widget requires a flat list of items. We add headers first, then each row's cells.
+        # --- Build the Grid/Table Widget with Emoji Indicators ---
         grid_items = [
-            # Header Row - Using bold markdown-style formatting
-            {"title": "*Store*", "textAlignment": "START"},
-            {"title": "*UPH*", "textAlignment": "CENTER"},
-            {"title": "*Lates*", "textAlignment": "CENTER"},
-            {"title": "*INF*", "textAlignment": "CENTER"},
+            {"title": "Store", "textAlignment": "START"},
+            {"title": "UPH", "textAlignment": "CENTER"},
+            {"title": "Lates", "textAlignment": "CENTER"},
+            {"title": "INF", "textAlignment": "CENTER"},
         ]
 
-        # Add a row for each store with the key metrics
         for entry in sorted_entries:
-            # Clean up values for a neater display in the table
-            uph = entry.get("uph", "N/A")
-            # Ensure "Lates" and "INF" always have a value and consistent spacing
-            lates = (entry.get("lates", "0.0 %") or "0.0 %").replace(" %", "%")
-            inf = (entry.get("inf", "0.0 %") or "0.0 %").replace(" %", "%")
+            uph_val = entry.get("uph", "N/A")
+            lates_val = entry.get("lates", "0.0 %") or "0.0 %"
+            inf_val = entry.get("inf", "0.0 %") or "0.0 %"
+
+            # Apply emoji formatting
+            formatted_uph = _format_metric_with_emoji(uph_val, UPH_THRESHOLD, is_uph=True)
+            formatted_lates = _format_metric_with_emoji(lates_val, LATES_THRESHOLD)
+            formatted_inf = _format_metric_with_emoji(inf_val, INF_THRESHOLD)
 
             grid_items.extend([
                 {"title": sanitize_store_name(entry.get("store", "N/A")), "textAlignment": "START"},
-                {"title": uph, "textAlignment": "CENTER"},
-                {"title": lates, "textAlignment": "CENTER"},
-                {"title": inf, "textAlignment": "CENTER"},
+                {"title": formatted_uph, "textAlignment": "CENTER"},
+                {"title": formatted_lates, "textAlignment": "CENTER"},
+                {"title": formatted_inf, "textAlignment": "CENTER"},
             ])
         
-        # This is the section that contains the grid widget.
         table_section = {
             "header": "Key Performance Indicators",
-            "collapsible": False, # Keep the main table visible
-            "uncollapsibleWidgetsCount": 1,
             "widgets": [{
                 "grid": {
                     "title": "Performance Summary",
-                    "columnCount": 4, # As defined by our headers
-                    "borderStyle": {
-                        "type": "STROKE",
-                        "cornerRadius": 4
-                    },
+                    "columnCount": 4,
+                    "borderStyle": {"type": "STROKE", "cornerRadius": 4},
                     "items": grid_items
                 }
             }]
         }
 
-        # --- 2. Build the original full-detail collapsible widgets ---
-        # This provides a more compact way to show the full details upon expansion.
-        detail_widgets = []
-        for entry in sorted_entries:
-            # Consolidate all metrics into a single 'decoratedText' widget per store
-            # using HTML line breaks for structure. This is more efficient.
-            full_details_text = (
-                f'{build_metric_line([("Orders", entry.get("orders", "N/A")), ("Units", entry.get("units", "N/A")), ("Fulfilled", entry.get("fulfilled", "N/A"))])}<br>'
-                f'{build_metric_line([("UPH", entry.get("uph", "N/A")), ("INF", entry.get("inf", "N/A")), ("Found", entry.get("found", "N/A"))])}<br>'
-                f'{build_metric_line([("Cancelled", entry.get("cancelled", "N/A")), ("Lates", entry.get("lates", "N/A")), ("Avail", entry.get("time_available", "N/A"))])}'
-            )
-
-            detail_widgets.append({
-                "decoratedText": {
-                    "topLabel": sanitize_store_name(entry.get("store", "Store")),
-                    "startIcon": {"knownIcon": "STORE"},
-                    "text": full_details_text
-                }
-            })
-        
-        # This section contains the full details list and is collapsible.
-        details_section = {
-            "header": "Full Details (All Stores)",
-            "collapsible": True,
-            "uncollapsibleWidgetsCount": 0, # Hide all widgets until expanded
-            "widgets": detail_widgets
-        }
-
-        # --- 3. Assemble the final payload with both the table and the details ---
+        # --- Assemble the final payload ---
         payload = {
             "cardsV2": [{
                 "cardId": f"batch-summary-{chat_batch_count}",
@@ -504,16 +421,15 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
                     "header": {
                         "title": "Seller Central Metrics Report",
                         "subtitle": card_subtitle,
-                        "imageUrl": "https://i.imgur.com/u0e3d2x.png", # Amazon 'a' logo
+                        "imageUrl": "https://i.imgur.com/u0e3d2x.png",
                         "imageType": "CIRCLE"
                     },
-                    # The sections are rendered in order. Table first, then details.
-                    "sections": [table_section, details_section],
+                    "sections": [table_section],
                 },
             }]
         }
         
-        timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=30)
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_context)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
@@ -528,7 +444,6 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
 
 
 async def add_to_pending_chat(entry: Dict[str, str]):
-    """Accumulate chat entries and send in batches."""
     if not CHAT_WEBHOOK_URL:
         return
     async with pending_chat_lock:
@@ -540,7 +455,6 @@ async def add_to_pending_chat(entry: Dict[str, str]):
 
 
 async def flush_pending_chat_entries():
-    """Send any remaining chat entries."""
     if not CHAT_WEBHOOK_URL:
         return
     async with pending_chat_lock:
@@ -551,14 +465,6 @@ async def flush_pending_chat_entries():
 
 
 async def log_submission(data: Dict[str,str]):
-    """Write a submission entry to CSV and JSON logs.
-
-    Args:
-        data (Dict[str, str]): Form fields that were sent to Google Forms.
-
-    Returns:
-        None
-    """
     async with log_lock:
         current_timestamp = datetime.now(LOCAL_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
         log_entry = {'timestamp': current_timestamp, **data}
@@ -582,15 +488,6 @@ async def log_submission(data: Dict[str,str]):
         await add_to_pending_chat(log_entry)
 
 async def http_form_submitter_worker(queue: Queue, worker_id: int):
-    """Submit queued form data via HTTP.
-
-    Args:
-        queue (Queue): Queue containing form dictionaries to submit.
-        worker_id (int): Identifier used for logging output.
-
-    Returns:
-        None
-    """
     log_prefix = f"[HTTP-Submitter-{worker_id}]"
     app_logger.info(f"{log_prefix} Starting up...")
     timeout = aiohttp.ClientTimeout(total=20)
@@ -626,23 +523,6 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
     app_logger.info(f"{log_prefix} Shut down.")
 
 async def data_collector_worker(browser: Browser, store_info: Dict[str,str], storage_template: Dict, queue: Queue):
-    """Collect metrics for a single store and enqueue them for submission.
-
-    A new browser context is created using the provided ``storage_template`` to
-    reuse authenticated session data. After navigating to the store's dashboard
-    the worker waits for the network response containing the performance
-    metrics, parses the required fields and puts a formatted dictionary into the
-    submission ``queue``. Failures are retried up to ``WORKER_RETRY_COUNT``
-    before the store is marked as failed.
-
-    Args:
-        browser (Browser): Shared Playwright browser instance.
-        store_info (Dict[str, str]): Mapping containing ``merchant_id``,
-            ``store_name`` and ``marketplace_id`` keys for the target store.
-        storage_template (Dict): Storage state template with authentication
-            cookies.
-        queue (Queue): Queue into which collected metrics are placed.
-    """
     merchant_id = store_info['merchant_id']
     store_name  = store_info['store_name']
     for attempt in range(WORKER_RETRY_COUNT):
@@ -675,37 +555,26 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
                 await refresh_button.click()
             api_data = await (await resp_info.value).json()
 
-            # --- UPDATED LATES SCRAPING LOGIC ---
             formatted_lates = "0 %"
             try:
-                # Step 1: Locate the target row and cell.
                 header_second_row = page.locator("kat-table-head kat-table-row").nth(1)
                 lates_cell = header_second_row.locator("kat-table-cell").nth(10)
-
-                # Step 2: CRUCIAL FIX - Explicitly wait for the cell to be visible.
-                # This ensures we don't try to read the value before it's populated by JavaScript.
                 await expect(lates_cell).to_be_visible(timeout=10000)
-
-                # Step 3: Get the text from the cell and add a log for debugging.
-                # This will show us exactly what the script sees in every run.
                 cell_text = (await lates_cell.text_content() or "").strip()
                 app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
 
-                # Step 4: Validate the text format.
                 if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
                     formatted_lates = cell_text
                     app_logger.info(f"[{store_name}] Successfully parsed 'Lates' as: {formatted_lates}")
-                elif cell_text: # If we got text but it wasn't the right format.
+                elif cell_text:
                     app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
-                else: # If the cell was empty after waiting.
+                else:
                     app_logger.warning(f"[{store_name}] 'Lates' cell was visible but empty, defaulting to 0 %.")
 
             except TimeoutError:
-                # This will now only trigger if the cell *never* becomes visible.
                 app_logger.warning(f"[{store_name}] Timed out waiting for the 'Lates' cell to become visible, defaulting to 0 %.")
             except Exception as e:
                 app_logger.error(f"[{store_name}] An unexpected error occurred while scraping 'Lates': {e}", exc_info=DEBUG_MODE)
-            # --- END OF UPDATED LATES LOGIC ---
 
             milliseconds_from_api = float(api_data.get('TimeAvailable_V2', 0.0))
             total_seconds = int(milliseconds_from_api / 1000)
@@ -737,17 +606,6 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
 #######################################################################
 
 async def managed_worker(store_item: Dict, browser: Browser, storage_template: Dict, queue: Queue):
-    """Run a single data collector while respecting the concurrency limit.
-
-    Args:
-        store_item (Dict): Details for the store being processed.
-        browser (Browser): Shared browser instance.
-        storage_template (Dict): Authentication state template.
-        queue (Queue): Queue where collected metrics are enqueued.
-
-    Returns:
-        None
-    """
     global active_workers_count
     await asyncio.sleep(random.uniform(0.1, 1.0))
     async with concurrency_condition:
@@ -761,11 +619,6 @@ async def managed_worker(store_item: Dict, browser: Browser, storage_template: D
             concurrency_condition.notify()
 
 async def process_urls():
-    """Main orchestration routine for scraping and submission.
-
-    Returns:
-        None
-    """
     global progress, start_time, run_failures, browser
     app_logger.info(f"Job 'process_urls' started with collector concurrency limit of {concurrency_limit}.")
     run_failures = []
@@ -856,11 +709,6 @@ async def process_urls():
 #######################################################################
 
 async def main():
-    """Entry point for running the scraper from the command line.
-
-    Returns:
-        None
-    """
     global playwright, browser
     app_logger.info("Starting up in single-run mode...")
     try:
