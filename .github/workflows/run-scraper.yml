@@ -48,7 +48,8 @@ jobs:
           fi
 
           # Get the current hour in London timezone (e.g., "09", "10", "17")
-          CURRENT_UK_HOUR=$(TZ="Europe/London" date +'%k' | xargs)
+          # Use %H to ensure leading zeros so values match the UK_TARGET_HOURS list
+          CURRENT_UK_HOUR=$(TZ="Europe/London" date +'%H')
 
           echo "Current UK hour is: ${CURRENT_UK_HOUR}"
           echo "Target hours are: ${{ env.UK_TARGET_HOURS }}"
