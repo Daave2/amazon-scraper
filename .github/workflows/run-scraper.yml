@@ -24,7 +24,7 @@ env:
   PLAYWRIGHT_BROWSERS_PATH: /opt/playwright
   # DEFINE YOUR TARGET UK HOURS HERE (24-hour format)
   # The main job will only run if the current UK hour is in this list.
-  UK_TARGET_HOURS: '06 10 01 02 20'
+  UK_TARGET_HOURS: '06 02 20'
 
 jobs:
   # ==============================================================================
