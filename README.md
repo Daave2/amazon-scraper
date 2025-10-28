@@ -7,6 +7,11 @@ submits them to a Google Form so they can be aggregated in Google Sheets.
 The code may be executed locally or through the included GitHub Actions
 workflow.
 
+
+
+https://github.com/user-attachments/assets/7ba7f0f6-4d0b-4cc2-9937-de5ad766fea4
+
+
 ## Table of Contents
 
 - [Features](#features)
