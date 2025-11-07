@@ -301,7 +301,51 @@ async def perform_login_and_otp(page: Page) -> bool:
         await page.get_by_label("Continue").click()
 
         password_field = page.get_by_label("Password")
-        await expect(password_field).to_be_visible(timeout=10000)
+        try:
+            await expect(password_field).to_be_visible(timeout=10000)
+        except TimeoutError:
+            app_logger.warning(
+                "Password field not visible after entering email. Attempting to bypass passkey flow.")
+
+            async def _click_if_visible(locator: Any) -> bool:
+                try:
+                    if locator and await locator.count() > 0:
+                        visible_locator = locator.first
+                        if await visible_locator.is_visible():
+                            await visible_locator.click()
+                            return True
+                except PlaywrightError as inner_error:
+                    app_logger.debug(
+                        f"Encountered error while handling alternate sign-in option: {inner_error}",
+                        exc_info=DEBUG_MODE,
+                    )
+                return False
+
+            bypass_attempted = False
+
+            other_ways_button = page.get_by_role("button", name=re.compile("other ways to sign in", re.I))
+            if await _click_if_visible(other_ways_button):
+                app_logger.info("Clicked 'Other ways to sign in' button to reveal password option.")
+                bypass_attempted = True
+
+            if not bypass_attempted:
+                passkey_bypass_selectors = [
+                    page.get_by_role("button", name=re.compile("use( your)? password", re.I)),
+                    page.get_by_role("link", name=re.compile("use( your)? password", re.I)),
+                    page.locator("text=/Use (your )?password/i"),
+                    page.locator("text=/Sign-in without passkey/i"),
+                ]
+                for locator in passkey_bypass_selectors:
+                    if await _click_if_visible(locator):
+                        app_logger.info("Clicked alternate sign-in option to fall back to password entry.")
+                        bypass_attempted = True
+                        break
+
+            if not bypass_attempted:
+                app_logger.warning(
+                    "No passkey bypass option detected. Proceeding without additional interaction.")
+
+            await expect(password_field).to_be_visible(timeout=10000)
         await password_field.fill(config['login_password'])
         await page.get_by_label("Sign in").click()
         
