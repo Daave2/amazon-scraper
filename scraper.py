@@ -297,8 +297,27 @@ async def perform_login_and_otp(page: Page) -> bool:
         else:
             app_logger.info("Flow: Login form with email field loaded directly.")
         
-        await page.get_by_label("Email or mobile phone number").fill(config['login_email'])
-        await page.get_by_label("Continue").click()
+        email_locator = page.get_by_label("Email or mobile phone number")
+        try:
+            await email_locator.fill(config['login_email'])
+        except TimeoutError:
+            app_logger.warning(
+                "Email field label not found or not interactable. Falling back to direct selector.")
+            fallback_email_field = page.locator(email_field_selector)
+            await expect(fallback_email_field).to_be_visible(timeout=10000)
+            await fallback_email_field.fill(config['login_email'])
+
+        continue_locator = page.get_by_label("Continue")
+        try:
+            await continue_locator.click()
+        except TimeoutError:
+            app_logger.warning(
+                "Continue control not available via label. Using fallback selector.")
+            fallback_continue = page.get_by_role("button", name=re.compile("continue", re.I))
+            if await fallback_continue.count() == 0:
+                fallback_continue = page.locator("input#continue, button#continue, input[name='continue']")
+            await expect(fallback_continue.first).to_be_visible(timeout=10000)
+            await fallback_continue.first.click()
 
         password_field = page.get_by_label("Password")
         try:
