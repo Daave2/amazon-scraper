@@ -121,7 +121,7 @@ jobs:
           "otp_secret_key":  "${OTP_SECRET_KEY}",
           "chat_webhook_url": "${CHAT_WEBHOOK_URL}",
           "max_concurrency": 35,
-          "initial_concurrency": 5,
+          "initial_concurrency": 10,
           "num_form_submitters": 2,
           "page_timeout_ms": 90000,
           "element_wait_timeout_ms": 20000,
