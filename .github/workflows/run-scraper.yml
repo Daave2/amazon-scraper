@@ -21,7 +21,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11'
-  PLAYWRIGHT_BROWSERS_PATH: /opt/playwright
+
   # DEFINE YOUR TARGET UK HOURS HERE (24-hour format)
   # The main job will only run if the current UK hour is in this list.
   UK_TARGET_HOURS: '06 02 20'
@@ -80,13 +80,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Cache pip
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -96,6 +90,13 @@ jobs:
 
     - name: Install Python dependencies
       run: pip install -r requirements.txt
+
+    - name: Cache Playwright browsers
+      uses: actions/cache@v4
+      id: playwright-cache
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
 
     - name: Install Playwright browsers & deps
       run: python -m playwright install --with-deps chromium
