@@ -130,6 +130,14 @@ jobs:
         }
         JSON
 
+    - name: Download auth state from previous run
+      uses: dawidd6/action-download-artifact@v6
+      with:
+        workflow: run-scraper.yml
+        name: auth-state
+        path: .
+        if_no_artifact_found: warn
+
     - name: Run scraper
       run: python scraper.py
 
@@ -143,3 +151,12 @@ jobs:
           app.log
           state.json
         retention-days: 7
+
+    - name: Upload auth state
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: auth-state
+        path: state.json
+        retention-days: 7
+        overwrite: true
