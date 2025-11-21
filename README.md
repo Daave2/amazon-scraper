@@ -30,6 +30,12 @@ https://github.com/user-attachments/assets/7ba7f0f6-4d0b-4cc2-9937-de5ad766fea4
 - Supports configurable concurrency and automatic adjustments based on system load
 - Produces structured logs in `output/` and rotates `app.log`
 - Optionally posts progress to Google Chat using collapsible cards grouped by timestamped batches. Store names are alphabetized and the standard "Morrisons -" prefix is trimmed for readability. Each store section now highlights metrics in bold bullet lists for a cleaner look.
+- **Enhanced Job Summary**: Sends a detailed post-run report to Google Chat including:
+  - High-level stats (Throughput, Success Rate, Duration)
+  - Business Volume (Total Orders, Units)
+  - Resilience Metrics (Retries, Stores Retried)
+  - Speed Breakdown (Avg Collection Time, p95 Latency, Bottleneck Analysis)
+  - Failure Analysis (Breakdown by error type and list of failed stores)
 
 ## Requirements
 
