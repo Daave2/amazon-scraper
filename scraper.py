@@ -116,7 +116,7 @@ FIELD_MAP = {
     'time_available': 'entry.1823671734',
 }
 
-INITIAL_CONCURRENCY = config.get('initial_concurrency', 10)
+INITIAL_CONCURRENCY = config.get('initial_concurrency', 30)
 NUM_FORM_SUBMITTERS = config.get('num_form_submitters', 2)
 
 AUTO_CONF = config.get('auto_concurrency', {})
