@@ -14,7 +14,11 @@
   "marketplace_id": "YOUR_MARKETPLACE_ID",
   "target_url": "https://sellercentral.amazon.co.uk/snowdash?...",
   "debug": false,
-  "schedule_times": ["10:00", "16:00", "19:00"],
+  "schedule_times": [
+    "10:00",
+    "16:00",
+    "19:00"
+  ],
   "auto_concurrency": {
     "enabled": true,
     "min_concurrency": 1,

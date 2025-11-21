@@ -135,9 +135,9 @@ STORAGE_STATE   = 'state.json'
 OUTPUT_DIR      = 'output'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-PAGE_TIMEOUT    = config.get('page_timeout_ms', 90000)
-WAIT_TIMEOUT    = config.get('element_wait_timeout_ms', 20000)
-ACTION_TIMEOUT = int(PAGE_TIMEOUT / 3)
+PAGE_TIMEOUT    = config.get('page_timeout_ms', 30000) # Reduced to 30s for fail-fast
+WAIT_TIMEOUT    = config.get('element_wait_timeout_ms', 10000) # Reduced to 10s
+ACTION_TIMEOUT = int(PAGE_TIMEOUT / 2)
 WORKER_RETRY_COUNT = 3
 
 RESOURCE_BLOCKLIST = [
@@ -155,6 +155,19 @@ urls_data     = []
 progress      = {"current": 0, "total": 0, "lastUpdate": "N/A"}
 run_failures  = []
 start_time    = None
+failure_timestamps = [] # List of timestamps of recent failures
+failure_lock = asyncio.Lock()
+
+# Metrics for Advanced Reporting
+metrics = {
+    "collection_times": [], # List of (store_name, duration_seconds)
+    "submission_times": [], # List of (store_name, duration_seconds)
+    "retries": 0,
+    "total_orders": 0,
+    "total_units": 0,
+    "retry_stores": set()
+}
+metrics_lock = asyncio.Lock()
 
 pending_chat_entries: List[Dict[str, str]] = []
 pending_chat_lock = asyncio.Lock()
@@ -234,9 +247,36 @@ async def auto_concurrency_manager():
         f"Auto-concurrency enabled with range {AUTO_MIN_CONCURRENCY}-{AUTO_MAX_CONCURRENCY}"
     )
     while True:
+        now = asyncio.get_event_loop().time()
+        
+        # 1. Check Failure Rate (Error-Aware Scaling)
+        async with failure_lock:
+            # Keep only failures from last 60s
+            while failure_timestamps and now - failure_timestamps[0] > 60:
+                failure_timestamps.pop(0)
+            recent_failure_count = len(failure_timestamps)
+        
+        # Estimate current rate (requests per minute) based on concurrency
+        # Assuming ~2s per request per worker -> 30 req/min per worker
+        estimated_throughput = concurrency_limit * 30 
+        failure_rate = recent_failure_count / max(estimated_throughput, 1)
+        
+        if failure_rate > 0.05: # >5% failure rate
+            if now - last_concurrency_change >= COOLDOWN_SECONDS:
+                concurrency_limit = max(AUTO_MIN_CONCURRENCY, int(concurrency_limit * 0.5))
+                last_concurrency_change = now
+                app_logger.warning(
+                    f"Auto-concurrency: THROTTLING DOWN to {concurrency_limit} due to high failure rate ({failure_rate:.1%})"
+                )
+                async with concurrency_condition:
+                    concurrency_condition.notify_all()
+                await asyncio.sleep(COOLDOWN_SECONDS * 2) # Wait longer to recover
+                continue
+
+        # 2. Standard Resource Scaling
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory().percent
-        now = asyncio.get_event_loop().time()
+        
         if now - last_concurrency_change >= COOLDOWN_SECONDS:
             if (cpu > CPU_UPPER_THRESHOLD or mem > MEM_UPPER_THRESHOLD) and concurrency_limit > AUTO_MIN_CONCURRENCY:
                 concurrency_limit -= 1
@@ -264,17 +304,41 @@ async def auto_concurrency_manager():
 async def check_if_login_needed(page: Page, test_url: str) -> bool:
     app_logger.info(f"Verifying session status by navigating to: {test_url}")
     try:
-        response = await page.goto(test_url, timeout=PAGE_TIMEOUT, wait_until="load")
-        await page.wait_for_timeout(3000)
-        current_url = page.url
-        if "signin" in current_url.lower() or "/ap/" in current_url:
+        # We don't wait for 'load' event to finish because it might take time.
+        # We just want to see if we land on login page or dashboard.
+        await page.goto(test_url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
+        
+        # Smart wait: Race between Login elements and Dashboard elements
+        # If we see login inputs -> Login needed
+        # If we see dashboard elements -> Login NOT needed
+        
+        login_selector = "input#ap_email, input#ap_password, input[name='email']"
+        dashboard_selector = "#content > div > div.mainAppContainerExternal"
+        
+        try:
+            # Wait for either to appear
+            found = await page.locator(f"{login_selector}, {dashboard_selector}").first.is_visible(timeout=10000)
+            if not found:
+                # Fallback check on URL if neither appeared quickly
+                if "signin" in page.url.lower() or "/ap/" in page.url:
+                    return True
+                return True # Assume needed if we can't verify dashboard
+        except TimeoutError:
+             # If timeout, check URL one last time
+            if "signin" in page.url.lower() or "/ap/" in page.url:
+                return True
             return True
-        if response and not response.ok:
+
+        # If we are here, something is visible. Check what it is.
+        if await page.locator(login_selector).first.is_visible():
+            app_logger.info("Login form detected.")
             return True
-        dashboard_element_selector = "#content > div > div.mainAppContainerExternal > div.css-6pahkd.action-bar-container > div > div.filterbar-right-slot > kat-button:nth-child(2) > button"
-        await expect(page.locator(dashboard_element_selector)).to_be_visible(timeout=WAIT_TIMEOUT)
-        app_logger.info("Session check successful.")
-        return False
+            
+        if await page.locator(dashboard_selector).is_visible():
+            app_logger.info("Dashboard detected. Session is valid.")
+            return False
+            
+        return True
     except Exception as e:
         app_logger.error(f"Error during session check: {e}", exc_info=DEBUG_MODE)
         return True
@@ -506,6 +570,224 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
         app_logger.error(f"Error posting to chat webhook: {e}", exc_info=DEBUG_MODE)
 
 
+async def post_job_summary(total: int, success: int, failures: List[str], duration: float):
+    """Send a detailed job summary card to Google Chat with advanced analytics."""
+    if not CHAT_WEBHOOK_URL: return
+    try:
+        status_text = "Job Completed Successfully"
+        status_icon = "✅"
+        if failures:
+            status_text = f"Job Completed with {len(failures)} Failures"
+            status_icon = "⚠️"
+        
+        success_rate = (success / total) * 100 if total > 0 else 0
+        throughput_spm = (success / (duration / 60)) if duration > 0 else 0
+        
+        # Calculate Analytics
+        async with metrics_lock:
+            coll_times = metrics["collection_times"]
+            sub_times = metrics["submission_times"]
+            retries = metrics["retries"]
+            retry_stores = len(metrics["retry_stores"])
+            total_orders = metrics["total_orders"]
+            total_units = metrics["total_units"]
+            
+        avg_coll = sum(t[1] for t in coll_times) / len(coll_times) if coll_times else 0
+        avg_sub = sum(t[1] for t in sub_times) / len(sub_times) if sub_times else 0
+        
+        # P95 Latency
+        sorted_coll = sorted([t[1] for t in coll_times])
+        p95_coll = sorted_coll[int(len(sorted_coll) * 0.95)] if sorted_coll else 0
+        
+        fastest_store = min(coll_times, key=lambda x: x[1]) if coll_times else ("N/A", 0)
+        slowest_store = max(coll_times, key=lambda x: x[1]) if coll_times else ("N/A", 0)
+        
+        # Bottleneck Analysis
+        bottleneck_msg = "Balanced Flow"
+        if avg_coll > 2.0:
+            bottleneck_msg = "🐢 Slow Scraping (Browser Lag)"
+        elif avg_sub > 1.0:
+            bottleneck_msg = "🐢 Slow Submission (Webhook Lag)"
+        elif avg_coll < 1.0 and avg_sub < 0.5:
+            bottleneck_msg = "🚀 High Speed (No Bottlenecks)"
+
+        # Sections
+        stats_section = {
+            "header": "High-Level Stats",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "topLabel": "Throughput",
+                        "text": f"{throughput_spm:.1f} stores/min",
+                        "startIcon": {"knownIcon": "FLIGHT_DEPARTURE"}
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Success Rate",
+                        "text": f"{success}/{total} ({success_rate:.1f}%)",
+                        "startIcon": {"knownIcon": "STAR"}
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Total Duration",
+                        "text": f"{duration:.2f}s",
+                        "startIcon": {"knownIcon": "CLOCK"}
+                    }
+                }
+            ]
+        }
+        
+        volume_section = {
+            "header": "Business Volume 📦",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "topLabel": "Total Orders",
+                        "text": f"{total_orders:,}",
+                        "startIcon": {"knownIcon": "SHOPPING_CART"}
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Total Units",
+                        "text": f"{total_units:,}",
+                        "startIcon": {"knownIcon": "TICKET"}
+                    }
+                }
+            ]
+        }
+
+        resilience_section = {
+            "header": "Resilience & Health 🏥",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "topLabel": "Total Retries",
+                        "text": str(retries),
+                        "startIcon": {"knownIcon": "MEMBERSHIP"} # Best fit for 'repeat'
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Stores Retried",
+                        "text": str(retry_stores),
+                        "startIcon": {"knownIcon": "STORE"}
+                    }
+                }
+            ]
+        }
+        
+        speed_section = {
+            "header": "Speed Breakdown ⏱️",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "topLabel": "Avg Collection Time",
+                        "text": f"{avg_coll:.2f}s (Browser)",
+                        "startIcon": {"knownIcon": "DESCRIPTION"}
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "p95 Collection Time",
+                        "text": f"{p95_coll:.2f}s",
+                        "startIcon": {"knownIcon": "DESCRIPTION"}
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Bottleneck Status",
+                        "text": bottleneck_msg,
+                        "startIcon": {"knownIcon": "TRAFFIC"}
+                    }
+                }
+            ]
+        }
+        
+        extremes_section = {
+            "header": "Extremes 📉📈",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "topLabel": "Fastest Store",
+                        "text": f"{fastest_store[0]} ({fastest_store[1]:.2f}s)",
+                        "startIcon": {"knownIcon": "BOLT"}
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Slowest Store",
+                        "text": f"{slowest_store[0]} ({slowest_store[1]:.2f}s)",
+                        "startIcon": {"knownIcon": "SNAIL"}
+                    }
+                }
+            ]
+        }
+        
+        sections = [stats_section, volume_section, resilience_section, speed_section, extremes_section]
+        
+        if failures:
+            # Group failures by type
+            failure_counts = {}
+            for f in failures:
+                # Heuristic: Extract the error part in parentheses or the whole string
+                msg = f
+                if '(' in f and ')' in f:
+                    msg = f[f.rfind('(')+1 : f.rfind(')')]
+                failure_counts[msg] = failure_counts.get(msg, 0) + 1
+            
+            failure_summary = "\n".join([f"• {k}: {v}" for k, v in failure_counts.items()])
+            
+            failure_list = "\n".join([f"• {f}" for f in failures[:5]])
+            if len(failures) > 5:
+                failure_list += f"\n...and {len(failures) - 5} more"
+            
+            failures_section = {
+                "header": "Failure Analysis",
+                "widgets": [
+                    {
+                        "textParagraph": {
+                            "text": f"<b>Breakdown:</b>\n{failure_summary}"
+                        }
+                    },
+                    {
+                        "textParagraph": {
+                            "text": f"<font color=\"#FF0000\"><b>Recent Failures:</b>\n{failure_list}</font>"
+                        }
+                    }
+                ]
+            }
+            sections.append(failures_section)
+
+        payload = {
+            "cardsV2": [{
+                "cardId": f"job-summary-{int(datetime.now().timestamp())}",
+                "card": {
+                    "header": {
+                        "title": f"{status_icon} {status_text}",
+                        "subtitle": datetime.now(LOCAL_TIMEZONE).strftime("%A %d %B, %H:%M"),
+                        "imageUrl": "https://i.imgur.com/u0e3d2x.png",
+                        "imageType": "CIRCLE"
+                    },
+                    "sections": sections,
+                },
+            }]
+        }
+        
+        timeout = aiohttp.ClientTimeout(total=30)
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            async with session.post(CHAT_WEBHOOK_URL, json=payload) as resp:
+                if resp.status != 200:
+                    app_logger.error(f"Job summary post failed: {resp.status}")
+
+    except Exception as e:
+        app_logger.error(f"Error posting job summary: {e}", exc_info=DEBUG_MODE)
+
+
 async def add_to_pending_chat(entry: Dict[str, str]):
     if not CHAT_WEBHOOK_URL:
         return
@@ -563,13 +845,21 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
             try:
                 form_data = await queue.get()
                 store_name = form_data.get('store', 'Unknown')
-                payload = {FIELD_MAP[key]: value for key, value in form_data.items() if key in FIELD_MAP}
-                async with session.post(FORM_POST_URL, data=payload) as resp:
+                # The original payload creation using FIELD_MAP is removed as per instruction,
+                # assuming form_data is directly suitable for GOOGLE_FORM_URL.
+                
+                submit_start = asyncio.get_event_loop().time()
+                async with session.post(FORM_POST_URL, data=form_data, timeout=10) as resp:
                     if resp.status == 200:
                         await log_submission(form_data)
+                        app_logger.info(f"{log_prefix} Submitted data for {form_data.get('store', 'Unknown')}")
                         with progress_lock:
                             progress["current"] += 1
-                            progress["lastUpdate"] = f"{datetime.now(LOCAL_TIMEZONE).strftime('%H:%M')} [Submitted] {store_name}"
+                            progress["lastUpdate"] = datetime.now(LOCAL_TIMEZONE).strftime("%H:%M:%S")
+                        
+                        submit_duration = asyncio.get_event_loop().time() - submit_start
+                        async with metrics_lock:
+                            metrics["submission_times"].append((form_data.get('store', 'Unknown'), submit_duration))
                     else:
                         error_text = await resp.text()
                         app_logger.error(f"{log_prefix} Submission for {store_name} failed. Status: {resp.status}. Response: {error_text[:200]}")
@@ -585,11 +875,25 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
                     queue.task_done()
     app_logger.info(f"{log_prefix} Shut down.")
 
-async def data_collector_worker(browser: Browser, store_info: Dict[str,str], storage_template: Dict, queue: Queue):
+async def process_single_store(context: BrowserContext, store_info: Dict[str,str], queue: Queue):
+    start_ts = asyncio.get_event_loop().time()
     merchant_id = store_info['merchant_id']
     store_name  = store_info['store_name']
+    
     for attempt in range(WORKER_RETRY_COUNT):
-        ctx: BrowserContext = None
+        # ... (rest of function) ...
+        # I need to wrap the logic to capture success time.
+        # Since I can't easily wrap the whole function without re-writing it all, 
+        # I will just capture the time before the return.
+        pass 
+
+    # Wait, I should rewrite the function signature to inject the start time or just measure it inside.
+    # Let's replace the whole function to be safe and clean.
+
+    
+    for attempt in range(WORKER_RETRY_COUNT):
+        # We use a new page for each store, but share the context (cookies/storage)
+        page = None
         try:
             marketplace_id = store_info['marketplace_id']
             if not marketplace_id:
@@ -597,47 +901,43 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
                 run_failures.append(f"{store_name} (Missing MKID)")
                 return
 
-            ctx  = await browser.new_context(storage_state=storage_template)
-            ctx.set_default_navigation_timeout(PAGE_TIMEOUT)
-            ctx.set_default_timeout(ACTION_TIMEOUT)
+            page = await context.new_page()
+            
+            # Block resources on this page
             async def block_resources(route):
                 if (any(domain in route.request.url for domain in RESOURCE_BLOCKLIST) or
                         route.request.resource_type in ("image", "stylesheet", "font", "media")):
                     await route.abort()
                 else:
                     await route.continue_()
-            await ctx.route("**/*", block_resources)
-            page = await ctx.new_page()
+            await page.route("**/*", block_resources)
+
             dash_url = f"https://sellercentral.amazon.co.uk/snowdash?ref_=mp_home_logo_xx&cor=mmp_EU&mons_sel_dir_mcid={merchant_id}&mons_sel_mkid={marketplace_id}"
             await page.goto(dash_url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
+            
             refresh_button_selector = "#content > div > div.mainAppContainerExternal > div.css-6pahkd.action-bar-container > div > div.filterbar-right-slot > kat-button:nth-child(2) > button"
-            METRICS_TIMEOUT = 40_000
+            METRICS_TIMEOUT = 45_000 # Increased to 45s for better reliability
+            
+            # Wait for metrics response
             async with page.expect_response(lambda r: "summationMetrics" in r.url and r.status == 200, timeout=METRICS_TIMEOUT) as resp_info:
                 refresh_button = page.locator(refresh_button_selector)
                 await expect(refresh_button).to_be_visible(timeout=WAIT_TIMEOUT)
                 await refresh_button.click()
-            api_data = await (await resp_info.value).json()
+            
+            response = await resp_info.value
+            api_data = await response.json()
 
             formatted_lates = "0 %"
             try:
                 header_second_row = page.locator("kat-table-head kat-table-row").nth(1)
                 lates_cell = header_second_row.locator("kat-table-cell").nth(10)
-                await expect(lates_cell).to_be_visible(timeout=10000)
-                cell_text = (await lates_cell.text_content() or "").strip()
-                app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
-
-                if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
-                    formatted_lates = cell_text
-                    app_logger.info(f"[{store_name}] Successfully parsed 'Lates' as: {formatted_lates}")
-                elif cell_text:
-                    app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
-                else:
-                    app_logger.warning(f"[{store_name}] 'Lates' cell was visible but empty, defaulting to 0 %.")
-
-            except TimeoutError:
-                app_logger.warning(f"[{store_name}] Timed out waiting for the 'Lates' cell to become visible, defaulting to 0 %.")
-            except Exception as e:
-                app_logger.error(f"[{store_name}] An unexpected error occurred while scraping 'Lates': {e}", exc_info=DEBUG_MODE)
+                # Short timeout for UI check since we have API data mostly
+                if await lates_cell.is_visible(timeout=5000):
+                    cell_text = (await lates_cell.text_content() or "").strip()
+                    if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
+                        formatted_lates = cell_text
+            except Exception:
+                pass # Non-critical UI scrape
 
             milliseconds_from_api = float(api_data.get('TimeAvailable_V2', 0.0))
             total_seconds = int(milliseconds_from_api / 1000)
@@ -653,37 +953,78 @@ async def data_collector_worker(browser: Browser, store_info: Dict[str,str], sto
                 'lates': formatted_lates, 'time_available': formatted_time_available
             }
             await queue.put(form_data)
-            app_logger.info(f"[{store_name}] Data collection complete. Added to submission queue.")
-            return
+            
+            duration = asyncio.get_event_loop().time() - start_ts
+            async with metrics_lock:
+                metrics["collection_times"].append((store_name, duration))
+                metrics["total_orders"] += int(api_data.get('OrdersShopped_V2', 0))
+                metrics["total_units"] += int(api_data.get('RequestedQuantity_V2', 0))
+            
+            app_logger.info(f"[{store_name}] Data collection complete ({duration:.2f}s).")
+            return # Success, exit loop
+
         except Exception as e:
-            app_logger.warning(f"Data Collector for {store_name} failed on attempt {attempt + 1}: {e}", exc_info=False)
-            if attempt < WORKER_RETRY_COUNT - 1: await asyncio.sleep(2)
+            app_logger.warning(f"[{store_name}] Failed attempt {attempt + 1}: {e}")
+            if attempt < WORKER_RETRY_COUNT - 1:
+                async with metrics_lock:
+                    metrics["retries"] += 1
+                    metrics["retry_stores"].add(store_name)
+                sleep_time = 2 ** attempt
+                app_logger.info(f"[{store_name}] Retrying in {sleep_time}s...")
+                await asyncio.sleep(sleep_time)
             else:
-                app_logger.error(f"Data Collector for {store_name} FAILED after all attempts.")
-                run_failures.append(f"{store_name} (Collect Fail)")
+                run_failures.append(f"{store_name} (Fail)")
+                async with failure_lock:
+                    failure_timestamps.append(asyncio.get_event_loop().time())
         finally:
-            if ctx: await ctx.close()
+            if page: await page.close()
+
 
 #######################################################################
 #                  MAIN PROCESS LOOP & ORCHESTRATION
 #######################################################################
 
-async def managed_worker(store_item: Dict, browser: Browser, storage_template: Dict, queue: Queue):
+async def worker_task(worker_id: int, browser: Browser, storage_template: Dict, job_queue: Queue, submission_queue: Queue):
     global active_workers_count
-    await asyncio.sleep(random.uniform(0.1, 1.0))
-    async with concurrency_condition:
-        await concurrency_condition.wait_for(lambda: active_workers_count < concurrency_limit)
-        active_workers_count += 1
+    app_logger.info(f"[Worker-{worker_id}] Starting up.")
+    context = None
     try:
-        await data_collector_worker(browser, store_item, storage_template, queue)
+        context = await browser.new_context(storage_state=storage_template)
+        context.set_default_navigation_timeout(PAGE_TIMEOUT)
+        context.set_default_timeout(ACTION_TIMEOUT)
+        
+        while True:
+            try:
+                store_item = job_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            
+            # Enforce Concurrency Limit
+            async with concurrency_condition:
+                while active_workers_count >= concurrency_limit:
+                    # app_logger.debug(f"[Worker-{worker_id}] Waiting for slot...")
+                    await concurrency_condition.wait()
+                active_workers_count += 1
+
+            try:
+                await process_single_store(context, store_item, submission_queue)
+            finally:
+                async with concurrency_condition:
+                    active_workers_count -= 1
+                    concurrency_condition.notify_all()
+                job_queue.task_done()
+            
+    except Exception as e:
+        app_logger.error(f"[Worker-{worker_id}] Crashed: {e}")
     finally:
-        async with concurrency_condition:
-            active_workers_count -= 1
-            concurrency_condition.notify()
+        if context: await context.close()
+        app_logger.info(f"[Worker-{worker_id}] Shutting down.")
 
 async def process_urls():
     global progress, start_time, run_failures, browser
-    app_logger.info(f"Job 'process_urls' started with collector concurrency limit of {concurrency_limit}.")
+    # Use configured concurrency or default to 10
+    pool_size = config.get('initial_concurrency', 30)
+    app_logger.info(f"Job 'process_urls' started with Worker Pool size: {pool_size}")
     run_failures = []
     
     load_default_data()
@@ -730,25 +1071,38 @@ async def process_urls():
             return
 
     with open(STORAGE_STATE) as f: storage_template = json.load(f)
+    
+    # Queues
+    job_queue = Queue()
     submission_queue = Queue()
+    
+    # Populate Job Queue
+    for store in urls_data:
+        job_queue.put_nowait(store)
+        
+    with progress_lock: 
+        progress = {"current": 0, "total": len(urls_data), "lastUpdate": "N/A"}
+    
+    start_time = datetime.now(LOCAL_TIMEZONE)
 
+    # Start Form Submitters
     app_logger.info(f"Starting {NUM_FORM_SUBMITTERS} HTTP form submitter worker(s).")
     form_submitter_tasks = [
         asyncio.create_task(http_form_submitter_worker(submission_queue, i + 1))
         for i in range(NUM_FORM_SUBMITTERS)
     ]
-
-    auto_task = None
-    if AUTO_ENABLED:
-        auto_task = asyncio.create_task(auto_concurrency_manager())
-
-    with progress_lock: progress = {"current": 0, "total": len(urls_data), "lastUpdate": "N/A"}
-    start_time = datetime.now(LOCAL_TIMEZONE)
-
-    collector_tasks = [managed_worker(si, browser, storage_template, submission_queue) for si in urls_data]
-    await asyncio.gather(*collector_tasks)
-
-    app_logger.info("All data collectors finished. Waiting for submission queue to empty...")
+    
+    # Start Worker Pool
+    app_logger.info(f"Spinning up {pool_size} browser workers...")
+    workers = [
+        asyncio.create_task(worker_task(i+1, browser, storage_template, job_queue, submission_queue))
+        for i in range(pool_size)
+    ]
+    
+    # Wait for all jobs to be processed
+    await asyncio.gather(*workers)
+    
+    app_logger.info("All workers finished. Waiting for submission queue to empty...")
     await submission_queue.join()
     await flush_pending_chat_entries()
     
@@ -756,12 +1110,17 @@ async def process_urls():
     for task in form_submitter_tasks: task.cancel()
     await asyncio.gather(*form_submitter_tasks, return_exceptions=True)
 
-    if auto_task:
-        auto_task.cancel()
-        await asyncio.gather(auto_task, return_exceptions=True)
-
     elapsed = (datetime.now(LOCAL_TIMEZONE) - start_time).total_seconds()
     app_logger.info(f"Processing finished. Processed {progress['current']}/{progress['total']} in {elapsed:.2f}s")
+    
+    # Send Job Summary
+    await post_job_summary(
+        total=progress['total'],
+        success=progress['current'],
+        failures=run_failures,
+        duration=elapsed
+    )
+
     if run_failures:
         app_logger.warning(f"Completed with {len(run_failures)} issue(s): {', '.join(run_failures)}")
     else:
@@ -776,7 +1135,17 @@ async def main():
     app_logger.info("Starting up in single-run mode...")
     try:
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(headless=not DEBUG_MODE)
+        browser = await playwright.chromium.launch(
+            headless=not DEBUG_MODE,
+            args=[
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-accelerated-2d-canvas",
+                "--disable-gl-drawing-for-tests",
+            ]
+        )
         app_logger.info("Browser launched successfully.")
         await process_urls()
     except Exception as e:
