@@ -845,11 +845,15 @@ async def http_form_submitter_worker(queue: Queue, worker_id: int):
             try:
                 form_data = await queue.get()
                 store_name = form_data.get('store', 'Unknown')
-                # The original payload creation using FIELD_MAP is removed as per instruction,
-                # assuming form_data is directly suitable for GOOGLE_FORM_URL.
+                
+                # Map keys to Google Form entry IDs
+                payload = {}
+                for key, value in form_data.items():
+                    if key in FIELD_MAP:
+                        payload[FIELD_MAP[key]] = value
                 
                 submit_start = asyncio.get_event_loop().time()
-                async with session.post(FORM_POST_URL, data=form_data, timeout=10) as resp:
+                async with session.post(FORM_POST_URL, data=payload, timeout=10) as resp:
                     if resp.status == 200:
                         await log_submission(form_data)
                         app_logger.info(f"{log_prefix} Submitted data for {form_data.get('store', 'Unknown')}")
