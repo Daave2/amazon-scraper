@@ -935,13 +935,22 @@ async def process_single_store(context: BrowserContext, store_info: Dict[str,str
             try:
                 header_second_row = page.locator("kat-table-head kat-table-row").nth(1)
                 lates_cell = header_second_row.locator("kat-table-cell").nth(10)
-                # Short timeout for UI check since we have API data mostly
-                if await lates_cell.is_visible(timeout=5000):
-                    cell_text = (await lates_cell.text_content() or "").strip()
-                    if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
-                        formatted_lates = cell_text
-            except Exception:
-                pass # Non-critical UI scrape
+                await expect(lates_cell).to_be_visible(timeout=10000)
+                cell_text = (await lates_cell.text_content() or "").strip()
+                app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
+
+                if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
+                    formatted_lates = cell_text
+                    app_logger.info(f"[{store_name}] Successfully parsed 'Lates' as: {formatted_lates}")
+                elif cell_text:
+                    app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
+                else:
+                    app_logger.warning(f"[{store_name}] 'Lates' cell was visible but empty, defaulting to 0 %.")
+
+            except TimeoutError:
+                app_logger.warning(f"[{store_name}] Timed out waiting for the 'Lates' cell to become visible, defaulting to 0 %.")
+            except Exception as e:
+                app_logger.error(f"[{store_name}] An unexpected error occurred while scraping 'Lates': {e}", exc_info=DEBUG_MODE)
 
             milliseconds_from_api = float(api_data.get('TimeAvailable_V2', 0.0))
             total_seconds = int(milliseconds_from_api / 1000)
