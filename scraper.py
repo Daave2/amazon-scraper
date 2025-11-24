@@ -85,6 +85,35 @@ except json.JSONDecodeError:
     app_logger.critical("config.json is not valid JSON. Please fix it.")
     exit(1)
 
+# --- CLI Argument Parsing ---
+import argparse
+
+parser = argparse.ArgumentParser(description='Amazon Seller Central Scraper')
+parser.add_argument('--date-mode', choices=['today', 'relative', 'custom'], help='Date range mode')
+parser.add_argument('--start-date', help='Start date (MM/DD/YYYY)')
+parser.add_argument('--end-date', help='End date (MM/DD/YYYY)')
+parser.add_argument('--start-time', help='Start time (e.g., "12:00 AM")')
+parser.add_argument('--end-time', help='End time (e.g., "11:59 PM")')
+parser.add_argument('--relative-days', type=int, help='Days offset for relative mode')
+
+args, unknown = parser.parse_known_args()
+
+# Merge CLI args into config (CLI takes precedence)
+if args.date_mode:
+    config['use_date_range'] = True
+    config['date_range_mode'] = args.date_mode
+
+if args.start_date: config['custom_start_date'] = args.start_date
+if args.end_date: config['custom_end_date'] = args.end_date
+if args.start_time: config['custom_start_time'] = args.start_time
+if args.end_time: config['custom_end_time'] = args.end_time
+if args.relative_days is not None: config['relative_days'] = args.relative_days
+
+# If start/end dates are provided via CLI, force mode to 'custom' if not specified
+if (args.start_date or args.end_date) and not args.date_mode:
+    config['use_date_range'] = True
+    config['date_range_mode'] = 'custom'
+
 DEBUG_MODE      = config.get('debug', False)
 LOGIN_URL       = config['login_url']
 CHAT_WEBHOOK_URL = config.get('chat_webhook_url')
@@ -102,7 +131,18 @@ def sanitize_store_name(name: str) -> str:
     """Trim standard prefix from store names for chat display."""
     return STORE_PREFIX_RE.sub("", name).strip()
 
-FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
+DEFAULT_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
+# User provided viewform URL: https://docs.google.com/forms/d/e/1FAIpQLSdCenFoO8cJFf8VU2-fS6TaFhwN_arTvAYDQQSsQ_aH1so09A/viewform
+# Converted to formResponse for submission
+CUSTOM_DATE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSdCenFoO8cJFf8VU2-fS6TaFhwN_arTvAYDQQSsQ_aH1so09A/formResponse"
+
+# Select URL based on whether date range is being used
+if config.get('use_date_range', False):
+    FORM_POST_URL = CUSTOM_DATE_FORM_URL
+    app_logger.info(f"Using CUSTOM date range form URL: {FORM_POST_URL}")
+else:
+    FORM_POST_URL = DEFAULT_FORM_URL
+    app_logger.info(f"Using DEFAULT form URL: {FORM_POST_URL}")
 FIELD_MAP = {
     'store':          'entry.117918617',
     'orders':         'entry.128719511',
@@ -483,6 +523,8 @@ async def prime_master_session() -> bool:
 
 # CSS selectors for the "Customised" dashboard tab
 CUSTOMISED_TAB_SELECTORS = [
+    "span.auiViewOptionNotSelected:has-text(\"Customised\")",
+    "span.auiViewOptionSelected:has-text(\"Customised\")", # In case it's already selected
     "#content > div > div.mainAppContainerExternal > div.paddingTop > div > div > div > div > span:nth-child(4)",
     "span:has-text(\"Customised\")",
     "[role='tab']:has-text(\"Customised\")",
@@ -493,6 +535,10 @@ DATE_PICKER_SELECTORS = [
     "kat-date-range-picker",
     "kat-dashboard-date-range-picker",
     "[class*='date-range-picker']",
+    "[class*='dateRangePicker']",
+    "[class*='date-picker']",
+    "div:has(> input[type='text'][placeholder*='date' i])",
+    "div:has(> input[type='text']) >> nth=0",  # First div containing text inputs
 ]
 
 async def _find_customised_tab(page: Page):
@@ -589,6 +635,15 @@ async def apply_date_time_range(page: Page, store_name: str) -> bool:
         await customised_tab.click(timeout=ACTION_TIMEOUT, force=True)
         app_logger.info(f"[{store_name}] Clicked 'Customised' tab")
         
+        # Wait for the date picker widget to load after tab click
+        # We use a specific selector that we know should appear
+        try:
+            await page.wait_for_selector("kat-date-range-picker", state="attached", timeout=5000)
+            app_logger.info(f"[{store_name}] 'kat-date-range-picker' attached to DOM")
+        except TimeoutError:
+            app_logger.warning(f"[{store_name}] 'kat-date-range-picker' did not attach within 5s, trying generic wait")
+            await page.wait_for_timeout(2000)
+        
         # Step 2: Wait for date picker to appear
         date_picker = await _wait_for_date_picker(page)
         app_logger.info(f"[{store_name}] Date picker is visible")
@@ -596,6 +651,9 @@ async def apply_date_time_range(page: Page, store_name: str) -> bool:
         # Step 3: Fill in date and time fields
         # Date inputs are type="text" within the date picker
         date_inputs = date_picker.locator('input[type="text"]')
+        # Wait for inputs to be ready
+        await expect(date_inputs.first).to_be_visible(timeout=5000)
+        
         await date_inputs.nth(0).fill(date_range['start_date'])
         await date_inputs.nth(1).fill(date_range['end_date'])
         app_logger.info(f"[{store_name}] Filled date fields: {date_range['start_date']} to {date_range['end_date']}")
@@ -611,7 +669,8 @@ async def apply_date_time_range(page: Page, store_name: str) -> bool:
             await page.get_by_text(date_range['end_time'], exact=True).click()
             app_logger.info(f"[{store_name}] Filled time fields: {date_range['start_time']} to {date_range['end_time']}")
         else:
-            app_logger.warning(f"[{store_name}] Time selectors not found, proceeding with dates only")
+            # This is common for some views (e.g. Shopper Performance) which only allow date selection
+            app_logger.info(f"[{store_name}] Time selectors not found (likely date-only view), proceeding with dates only")
         
         # Step 4: Click "Apply" and wait for metrics response
         apply_btn = page.get_by_role("button", name="Apply")
