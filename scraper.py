@@ -717,6 +717,11 @@ async def post_to_chat_webhook(entries: List[Dict[str, str]]):
         chat_batch_count += 1
         batch_header_text = datetime.now(LOCAL_TIMEZONE).strftime("%A %d %B, %H:%M")
         card_subtitle = f"{batch_header_text}  Batch {chat_batch_count} ({len(entries)} stores)"
+        
+        # Add date range to subtitle if active
+        date_range = get_date_time_range_from_config()
+        if date_range:
+            card_subtitle += f" • 📅 {date_range['start_date']} - {date_range['end_date']}"
 
         sorted_entries = sorted(entries, key=lambda e: sanitize_store_name(e.get("store", "")))
 
