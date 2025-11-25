@@ -136,7 +136,7 @@ OUTPUT_DIR      = 'output'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 PAGE_TIMEOUT    = config.get('page_timeout_ms', 30000) # Reduced to 30s for fail-fast
-WAIT_TIMEOUT    = config.get('element_wait_timeout_ms', 10000) # Reduced to 10s
+WAIT_TIMEOUT    = config.get('element_wait_timeout_ms', 15000) # Reduced to 10s
 ACTION_TIMEOUT = int(PAGE_TIMEOUT / 2)
 WORKER_RETRY_COUNT = 3
 
@@ -885,17 +885,6 @@ async def process_single_store(context: BrowserContext, store_info: Dict[str,str
     store_name  = store_info['store_name']
     
     for attempt in range(WORKER_RETRY_COUNT):
-        # ... (rest of function) ...
-        # I need to wrap the logic to capture success time.
-        # Since I can't easily wrap the whole function without re-writing it all, 
-        # I will just capture the time before the return.
-        pass 
-
-    # Wait, I should rewrite the function signature to inject the start time or just measure it inside.
-    # Let's replace the whole function to be safe and clean.
-
-    
-    for attempt in range(WORKER_RETRY_COUNT):
         # We use a new page for each store, but share the context (cookies/storage)
         page = None
         try:
@@ -931,26 +920,30 @@ async def process_single_store(context: BrowserContext, store_info: Dict[str,str
             response = await resp_info.value
             api_data = await response.json()
 
+            # --- START OF MODIFIED LATES SECTION ---
+            # NOTE: The inner try/except TimeoutError block has been removed.
+            # If the "Lates" element is not found within 10 seconds, expect().to_be_visible()
+            # will raise a TimeoutError. This error will propagate up to the outer 'except Exception',
+            # causing the worker to trigger a retry of the whole page.
+            
+            header_second_row = page.locator("kat-table-head kat-table-row").nth(1)
+            lates_cell = header_second_row.locator("kat-table-cell").nth(10)
+            
+            # This triggers a retry if the element is not found
+            await expect(lates_cell).to_be_visible(timeout=10000)
+            
+            cell_text = (await lates_cell.text_content() or "").strip()
+            app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
+
             formatted_lates = "0 %"
-            try:
-                header_second_row = page.locator("kat-table-head kat-table-row").nth(1)
-                lates_cell = header_second_row.locator("kat-table-cell").nth(10)
-                await expect(lates_cell).to_be_visible(timeout=10000)
-                cell_text = (await lates_cell.text_content() or "").strip()
-                app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
-
-                if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
-                    formatted_lates = cell_text
-                    app_logger.info(f"[{store_name}] Successfully parsed 'Lates' as: {formatted_lates}")
-                elif cell_text:
-                    app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
-                else:
-                    app_logger.warning(f"[{store_name}] 'Lates' cell was visible but empty, defaulting to 0 %.")
-
-            except TimeoutError:
-                app_logger.warning(f"[{store_name}] Timed out waiting for the 'Lates' cell to become visible, defaulting to 0 %.")
-            except Exception as e:
-                app_logger.error(f"[{store_name}] An unexpected error occurred while scraping 'Lates': {e}", exc_info=DEBUG_MODE)
+            if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
+                formatted_lates = cell_text
+                app_logger.info(f"[{store_name}] Successfully parsed 'Lates' as: {formatted_lates}")
+            elif cell_text:
+                app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
+            else:
+                app_logger.warning(f"[{store_name}] 'Lates' cell was visible but empty, defaulting to 0 %.")
+            # --- END OF MODIFIED LATES SECTION ---
 
             milliseconds_from_api = float(api_data.get('TimeAvailable_V2', 0.0))
             total_seconds = int(milliseconds_from_api / 1000)
