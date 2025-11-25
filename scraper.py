@@ -930,7 +930,7 @@ async def process_single_store(context: BrowserContext, store_info: Dict[str,str
             lates_cell = header_second_row.locator("kat-table-cell").nth(10)
             
             # This triggers a retry if the element is not found
-            await expect(lates_cell).to_be_visible(timeout=10000)
+            await expect(lates_cell).to_be_visible(timeout=15000)
             
             cell_text = (await lates_cell.text_content() or "").strip()
             app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
