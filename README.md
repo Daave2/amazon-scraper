@@ -9,8 +9,6 @@ workflow.
 
 
 
-https://github.com/user-attachments/assets/7ba7f0f6-4d0b-4cc2-9937-de5ad766fea4
-
 
 ## Table of Contents
 
@@ -24,12 +22,11 @@ https://github.com/user-attachments/assets/7ba7f0f6-4d0b-4cc2-9937-de5ad766fea4
 
 ## Features
 
-- Automates the sign-in flow for Seller Central including two-step verification
 - Collects metrics for multiple stores listed in `urls.csv`
 - Posts metrics to a configurable Google Form
 - Supports configurable concurrency and automatic adjustments based on system load
 - Produces structured logs in `output/` and rotates `app.log`
-- Optionally posts progress to Google Chat using collapsible cards grouped by timestamped batches. Store names are alphabetized and the standard "Morrisons -" prefix is trimmed for readability. Each store section now highlights metrics in bold bullet lists for a cleaner look.
+- Optionally posts progress to Google Chat using collapsible cards grouped by timestamped batches. 
 - **Enhanced Job Summary**: Sends a detailed post-run report to Google Chat including:
   - High-level stats (Throughput, Success Rate, Duration)
   - Business Volume (Total Orders, Units)
@@ -81,27 +78,11 @@ creates a `config.json` from repository secrets and runs the scraper on a
 schedule. It checks the current UK time against `UK_TARGET_HOURS` to decide
 whether to proceed with a run.
 
-Secrets expected by the workflow include `FORM_URL`, `LOGIN_URL`, `SECRET_KEY`,
-`LOGIN_EMAIL`, `LOGIN_PASSWORD`, `OTP_SECRET_KEY` and `CHAT_WEBHOOK_URL`. These
-map to the fields in `config.example.json`.
-
 Artifacts such as logs are uploaded for each run and kept for seven days.
 
 ## Configuration Reference
 
 Key options from `config.example.json`:
-
-- `login_email` / `login_password` – Seller Central credentials
-- `otp_secret_key` – secret for generating two-step verification codes
-- `form_url` – Google Form to submit scraped metrics
-- `initial_concurrency` – number of concurrent browser workers
-- `num_form_submitters` – number of HTTP workers sending form data
-- `auto_concurrency` – optional automatic scaling of concurrency limits. When enabled, the scraper adjusts `concurrency_limit` between `min_concurrency` and `max_concurrency` based on CPU and memory load.
-- `chat_webhook_url` – optional Google Chat webhook to post progress messages. When configured, results are grouped into timestamped cards with per-store collapsible sections
-- `chat_batch_size` – how many store results to group into a single chat card (default: 100)
-- `schedule_times` – optional list of times (HH:MM) to run the scraper when using automation
-- `debug` – enable verbose logging and save extra screenshots
-- `max_concurrency` / `min_concurrency` – bounds for automatically adjusted concurrency
 
 See the example file for full details.
 
