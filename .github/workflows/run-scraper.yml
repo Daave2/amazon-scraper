@@ -2,11 +2,169 @@ name: Run Playwright Scraper
 
 # ==============================================================================
 # ─── TRIGGERS ─────────────────────────────────────────────────────────────────
-# This section defines WHEN the scraper runs.
 # ==============================================================================
 on:
-  # 1. MANUAL TRIGGER: Allows you to run the scraper anytime from the "Actions" tab in GitHub.
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+# CRITICAL FIX 1: set cancel-in-progress to 'false'
+# If the 02:00 job is delayed and starts at 03:01, we do NOT want the 
+# 03:00 trigger to kill the old one. We want them to queue up.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  # Make sure these match exactly what "date +%H" outputs (00-23)
+  UK_TARGET_HOURS: '05 02 21'
+
+jobs:
+  # ==============================================================================
+  # JOB 1: CHECK TIME (With Delay Protection)
+  # ==============================================================================
+  check-time:
+    runs-on: ubuntu-latest
+    outputs:
+      run_job: ${{ steps.check_hour.outputs.run_job }}
+    steps:
+      - name: Check current UK hour against target hours
+        id: check_hour
+        run: |
+          # 1. ALWAYS RUN ON MANUAL TRIGGER
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger detected. The main job will run."
+            echo "run_job=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 2. GET TIME VARIABLES (London Time)
+          # %1M gets the minute without leading zeros to prevent math errors
+          NOW_HOUR=$(TZ="Europe/London" date +'%H')
+          PREV_HOUR=$(TZ="Europe/London" date -d '1 hour ago' +'%H')
+          MINUTE=$(TZ="Europe/London" date +'%1M')
+
+          echo "Current Time: ${NOW_HOUR}:${MINUTE}"
+          echo "Target Hours: ${{ env.UK_TARGET_HOURS }}"
+
+          SHOULD_RUN="false"
+
+          # 3. LOGIC CHECK
+          
+          # CHECK A: Is the current hour in our list? (Normal Case)
+          if [[ " ${{ env.UK_TARGET_HOURS }} " =~ " ${NOW_HOUR} " ]]; then
+            echo "Match found! Current hour (${NOW_HOUR}) is a target."
+            SHOULD_RUN="true"
+
+          # CHECK B: Is it a delayed run? (The Fix)
+          # If we are in the first 30 mins of an hour, check if the PREVIOUS hour was a target.
+          # Example: Scheduled for 02:00, but runs at 03:10 due to GitHub delay.
+          # Script sees: Minute is 10 (<30). Previous hour was 02. 02 is in list. -> RUN.
+          elif [ "$MINUTE" -lt 30 ] && [[ " ${{ env.UK_TARGET_HOURS }} " =~ " ${PREV_HOUR} " ]]; then
+            echo "Late start detected (Minute: ${MINUTE}). The previous hour (${PREV_HOUR}) was a target."
+            SHOULD_RUN="true"
+          fi
+
+          # 4. OUTPUT RESULT
+          if [ "$SHOULD_RUN" = "true" ]; then
+            echo "run_job=true" >> $GITHUB_OUTPUT
+          else
+            echo "Not a target time (Current: ${NOW_HOUR}, Prev: ${PREV_HOUR}). Skipping."
+            echo "run_job=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ==============================================================================
+  # JOB 2: SCRAPE AND SUBMIT
+  # ==============================================================================
+  scrape-and-submit:
+    needs: check-time
+    if: needs.check-time.outputs.run_job == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: pip install -r requirements.txt
+
+    - name: Cache Playwright browsers
+      uses: actions/cache@v4
+      id: playwright-cache
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+
+    - name: Install Playwright browsers & deps
+      run: python -m playwright install --with-deps chromium
+
+    - name: Build runtime config from Secrets
+      env:
+        FORM_URL:        ${{ secrets.FORM_URL }}
+        LOGIN_URL:       ${{ secrets.LOGIN_URL }}
+        SECRET_KEY:      ${{ secrets.SECRET_KEY }}
+        LOGIN_EMAIL:     ${{ secrets.LOGIN_EMAIL }}
+        LOGIN_PASSWORD:  ${{ secrets.LOGIN_PASSWORD }}
+        OTP_SECRET_KEY:  ${{ secrets.OTP_SECRET_KEY }}
+        CHAT_WEBHOOK_URL: ${{ secrets.CHAT_WEBHOOK_URL }}
+      run: |
+        cat > config.json <<JSON
+        {
+          "debug": false,
+          "form_url":        "${FORM_URL}",
+          "login_url":       "${LOGIN_URL}",
+          "secret_key":      "${SECRET_KEY}",
+          "login_email":     "${LOGIN_EMAIL}",
+          "login_password":  "${LOGIN_PASSWORD}",
+          "otp_secret_key":  "${OTP_SECRET_KEY}",
+          "chat_webhook_url": "${CHAT_WEBHOOK_URL}",
+          "max_concurrency": 55,
+          "initial_concurrency": 30,
+          "num_form_submitters": 2,
+          "page_timeout_ms": 90000,
+          "element_wait_timeout_ms": 20000,
+          "auto_concurrency": { "enabled": true }
+        }
+        JSON
+
+    - name: Download auth state from previous run
+      uses: dawidd6/action-download-artifact@v6
+      with:
+        workflow: run-scraper.yml
+        name: auth-state
+        path: .
+        if_no_artifact_found: warn
+        search_artifacts: true
+
+    - name: Run scraper
+      run: python scraper.py
+
+    - name: Upload artifacts on failure or success
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: scraper-output-${{ github.run_id }}
+        path: |
+          output/
+          app.log
+          state.json
+        retention-days: 7
+
+    - name: Upload auth state
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: auth-state
+        path: state.json
+        retention-days: 7
+        overwrite: true
 
   # 2. SCHEDULED RUNS:
   #    This workflow runs at the start of EVERY hour. A check job then determines
