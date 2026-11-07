@@ -936,8 +936,9 @@ async def process_single_store(context: BrowserContext, store_info: Dict[str,str
             app_logger.info(f"[{store_name}] Raw 'Lates' text scraped: '{cell_text}'")
 
             formatted_lates = "0 %"
-            if re.fullmatch(r"\d+(\.\d+)?\s*%", cell_text):
-                formatted_lates = cell_text
+            lates_match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*%?", cell_text)
+            if lates_match:
+                formatted_lates = f"{lates_match.group(1)} %"
                 app_logger.info(f"[{store_name}] Successfully parsed 'Lates' as: {formatted_lates}")
             elif cell_text:
                 app_logger.warning(f"[{store_name}] Scraped 'Lates' value '{cell_text}' but it didn't match format, defaulting to 0 %.")
