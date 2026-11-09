@@ -9,15 +9,15 @@ on:
   workflow_dispatch:
 
   # 2. SCHEDULED RUNS:
-  #    Changed from '0' to '15' to avoid GitHub's high load at the top of the hour.
-  #    This ensures the job starts while it is still the correct hour.
+  #    GitHub Actions cron uses UTC. These are the combined GMT/BST candidate
+  #    hours for the target London hours below; the check job selects the right ones.
   schedule:
-    - cron: '15 * * * *'
+    - cron: '15 0-5,19-20 * * *'
 
-# Abort an older run of the same branch if a new one starts
+# Let a delayed target-hour run finish instead of cancelling it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: '3.11'
