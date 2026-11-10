@@ -60,8 +60,8 @@ def main():
             f"verified submissions={len(expected) - len(missing)}/{len(expected)}",
             flush=True,
         )
-        if not missing and exit_code == 0:
-            print("All stores were submitted. No retry needed.", flush=True)
+        if not missing:
+            print("All expected stores have form submissions. No retry needed.", flush=True)
             return 0
 
         if missing:
