@@ -1,4 +1,4 @@
-"""Alert Google Chat when overnight scraper runs or store submissions are missing."""
+"""Alert Google Chat if overnight scheduled scrapes leave any stores missing."""
 
 import csv
 import io
@@ -13,7 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 UK = ZoneInfo("Europe/London")
-SLOTS = {"15 1 * * *": "01:15", "15 4 * * *": "04:15"}
+SLOTS = {"17 1 * * *": "01:17 UTC", "37 2 * * *": "02:37 UTC", "47 3 * * *": "03:47 UTC"}
 TIMEOUT = 35
 
 
@@ -125,16 +125,14 @@ def audit():
 
     missing = sorted(set(expected) - reported)
     absent = [SLOTS[cron] for cron, runs in slots.items() if not runs]
-    # Re-runs of the same scheduled slot are acceptable: any successful attempt counts.
-    all_failed = all(
-        runs and not any(run.get("conclusion") == "success" for run, _ in runs)
-        for runs in slots.values()
-    )
-    all_failed = bool(all_failed and all(slots.values()))
 
     print(f"UK date: {day}; confirmed stores: {len(expected) - len(missing)}/{len(expected)}")
     print("Scheduled slots with reports:", {SLOTS[key]: len(value) for key, value in slots.items()})
-    if not absent and not missing and not all_failed:
+    # The sheet merges submissions across attempts. Missing backup slots alone
+    # should not cause a noisy alert when all stores were already captured.
+    if not missing:
+        if absent:
+            print(f"Some scheduled slots lacked reports ({', '.join(absent)}), but all stores were captured.")
         print("Overnight scraper healthy; no Google Chat alert")
         return
 
@@ -149,8 +147,8 @@ def audit():
         else:
             results = ", ".join(f"#{run['run_number']} {run.get('conclusion') or run.get('status')}" for run, _ in runs)
             lines.append(f"{label}: {results}")
-    if all_failed:
-        lines.append("Both scraper workflow runs finished without a successful GitHub result.")
+    if not any(slots.values()):
+        lines.append("No scheduled scraper run produced a verifiable report.")
     if missing:
         store_list = ", ".join(expected[key] for key in missing[:20])
         if len(missing) > 20:
