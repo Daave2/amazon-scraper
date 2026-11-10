@@ -1,16 +1,15 @@
 name: Run Playwright Scraper
 
-# Run at 01:15 and 04:15 local UK time every day, including BST/GMT changes.
-# At 05:30, verify store submission reports and notify Google Chat on problems.
+# Primary, backup and final safety-net scrapes use fixed UTC times.
+# All scrape slots fall between 01:17 and 04:47 UK time throughout GMT/BST.
+# The 05:30 UTC monitor verifies the combined store submissions.
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 1 * * *'
-      timezone: 'Europe/London'
-    - cron: '15 4 * * *'
-      timezone: 'Europe/London'
-    - cron: '30 5 * * *'
-      timezone: 'Europe/London'
+    - cron: '17 1 * * *'   # Primary: 01:17 GMT / 02:17 BST
+    - cron: '37 2 * * *'   # Backup: 02:37 GMT / 03:37 BST
+    - cron: '47 3 * * *'   # Final fallback: 03:47 GMT / 04:47 BST
+    - cron: '30 5 * * *'   # Monitor: 05:30 GMT / 06:30 BST
 
 env:
   PYTHON_VERSION: '3.11'
@@ -97,8 +96,8 @@ jobs:
           if_no_artifact_found: warn
           search_artifacts: true
 
-      - name: Run scraper
-        run: python scraper.py
+      - name: Run scraper and automatically retry incomplete submissions
+        run: python .github/scripts/run_with_retry.py
 
       - name: Write submission status for morning monitoring
         if: always()
