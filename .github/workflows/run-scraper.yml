@@ -10,7 +10,6 @@ on:
     - cron: '37 2 * * *'   # Backup: 02:37 GMT / 03:37 BST
     - cron: '47 3 * * *'   # Final fallback: 03:47 GMT / 04:47 BST
     - cron: '30 5 * * *'   # Monitor: 05:30 GMT / 06:30 BST
-    - cron: '40 7 10 11 *' # TEMP TEST: Tue 10 Nov 2026, 07:40 GMT; remove after checking
 
 env:
   PYTHON_VERSION: '3.11'
