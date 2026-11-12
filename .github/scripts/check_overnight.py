@@ -1,172 +1,144 @@
-"""Alert Google Chat if overnight scheduled scrapes leave any stores missing."""
+"""Check successful scheduled scraper jobs and alert Google Chat if none completed.
 
-import csv
-import io
+The scraper runner returns a failing job when any expected store submission is
+missing after its automatic retry. We deliberately check job conclusions via the
+GitHub REST API instead of downloading artifacts: artifact ZIP redirects can
+fail authentication and previously caused misleading 0/100 alerts.
+"""
+
 import json
 import os
 import sys
-import urllib.error
-import urllib.parse
 import urllib.request
-import zipfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 UK = ZoneInfo("Europe/London")
-SLOTS = {"17 1 * * *": "01:17 UTC", "37 2 * * *": "02:37 UTC", "47 3 * * *": "03:47 UTC"}
-TIMEOUT = 35
-
-
-class SafeRedirect(urllib.request.HTTPRedirectHandler):
-    """Do not forward GitHub API authorization to artifact storage hosts."""
-
-    def redirect_request(self, request, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(request.full_url).hostname != urllib.parse.urlsplit(newurl).hostname:
-            headers = {k: v for k, v in headers.items() if k.lower() not in ("authorization", "cookie")}
-        return super().redirect_request(request, fp, code, msg, headers, newurl)
-
-
-opener = urllib.request.build_opener(SafeRedirect())
-
-
-def request(url, *, payload=None, bearer=None):
-    headers = {"User-Agent": "overnight-scraper-monitor", "Accept": "application/vnd.github+json"}
-    if bearer:
-        headers["Authorization"] = f"Bearer {bearer}"
-        headers["X-GitHub-Api-Version"] = "2022-11-28"
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=payload, headers=headers)
-    with opener.open(req, timeout=TIMEOUT) as response:
-        return response.read()
+TIMEOUT = 30
 
 
 def github_api(path):
     repo = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GH_TOKEN"]
-    base = f"https://api.github.com/repos/{repo}"
-    return json.loads(request(base + path, bearer=token))
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}{path}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "overnight-scraper-monitor",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+        return json.load(response)
 
 
-def expected_stores():
-    with open("urls.csv", encoding="utf-8-sig", newline="") as handle:
-        return {
-            row["store_name"].strip().casefold(): row["store_name"].strip()
-            for row in csv.DictReader(handle)
-            if row.get("store_name", "").strip()
-        }
-
-
-def recent_scheduled_runs(day):
+def scheduled_runs_today(today):
+    """Return all scheduled workflow executions created on the UK calendar day."""
     found = []
     for page in range(1, 6):
-        result = github_api(
-            f"/actions/workflows/run-scraper.yml/runs?event=schedule&per_page=100&page={page}"
+        response = github_api(
+            f"/actions/workflows/run-scraper.yml/runs"
+            f"?event=schedule&per_page=100&page={page}"
         )
-        batch = result.get("workflow_runs", [])
+        batch = response.get("workflow_runs", [])
         if not batch:
             break
-        old = False
+        seen_older_day = False
         for run in batch:
-            created = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")).astimezone(UK)
-            if created.date() == day:
+            created = datetime.fromisoformat(
+                run["created_at"].replace("Z", "+00:00")
+            ).astimezone(UK)
+            if created.date() == today:
                 found.append(run)
-            elif created.date() < day:
-                old = True
-        if old or len(batch) < 100:
+            elif created.date() < today:
+                seen_older_day = True
+        if seen_older_day or len(batch) < 100:
             break
     return found
 
 
-def read_report(run_id):
-    listing = github_api(f"/actions/runs/{run_id}/artifacts?per_page=100")
-    for artifact in listing.get("artifacts", []):
-        if artifact.get("name") != f"scraper-status-{run_id}" or artifact.get("expired"):
-            continue
-        url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/actions/artifacts/{artifact['id']}/zip"
-        archive = request(url, bearer=os.environ["GH_TOKEN"])
-        with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-            matches = [name for name in zf.namelist() if name.endswith("scraper-status.json")]
-            if not matches:
-                raise ValueError(f"Status artifact for run {run_id} has no report")
-            return json.loads(zf.read(matches[0]))
+def scraper_job(run_id):
+    """Return the scraper job, excluding the dedicated monitoring-only job."""
+    for page in range(1, 4):
+        response = github_api(f"/actions/runs/{run_id}/jobs?per_page=100&page={page}")
+        batch = response.get("jobs", [])
+        for job in batch:
+            if job.get("name") == "scrape-and-submit":
+                return job
+        if len(batch) < 100:
+            break
     return None
 
 
-def alert(message):
-    webhook = os.environ.get("CHAT_WEBHOOK_URL", "").strip()
-    if not webhook:
-        raise RuntimeError("CHAT_WEBHOOK_URL is not configured")
-    request(webhook, payload=json.dumps({"text": message}).encode("utf-8"))
-    print("Google Chat alert sent")
+def notify(message):
+    url = os.environ.get("CHAT_WEBHOOK_URL", "").strip()
+    if not url:
+        raise RuntimeError("CHAT_WEBHOOK_URL is missing")
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"text": message}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "scraper-health-check"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"Google Chat webhook returned {response.status}")
+    print("Google Chat health alert sent", flush=True)
 
 
 def audit():
     day = datetime.now(UK).date()
-    expected = expected_stores()
-    if not expected:
-        raise ValueError("No expected stores found in urls.csv")
-
-    slots = {key: [] for key in SLOTS}
-    reported = set()
-    for run in recent_scheduled_runs(day):
-        try:
-            report = read_report(run["id"])
-        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
-            print(f"Cannot read report for run {run['id']}: {exc}")
+    scheduled = scheduled_runs_today(day)
+    results = []
+    for run in scheduled:
+        job = scraper_job(run["id"])
+        if job is None:
+            # The 05:30 monitor is supposed to have no scrape job.
             continue
-        if report is None:
-            continue
-        cron = report.get("scheduled_cron")
-        if cron not in slots or report.get("uk_date") != day.isoformat() or report.get("event") != "schedule":
-            continue
-        slots[cron].append((run, report))
-        reported.update(str(name).strip().casefold() for name in report.get("submitted_stores", []))
+        results.append(
+            {
+                "run_number": run["run_number"],
+                "conclusion": job.get("conclusion"),
+                "status": job.get("status"),
+            }
+        )
 
-    missing = sorted(set(expected) - reported)
-    absent = [SLOTS[cron] for cron, runs in slots.items() if not runs]
+    success = [r for r in results if r["conclusion"] == "success"]
+    print(f"UK date: {day}", flush=True)
+    print(f"Scheduled scraper jobs found: {len(results)}", flush=True)
+    print(f"Scheduled scrapes completed successfully: {len(success)}", flush=True)
+    print(f"Scraper jobs: {results}", flush=True)
 
-    print(f"UK date: {day}; confirmed stores: {len(expected) - len(missing)}/{len(expected)}")
-    print("Scheduled slots with reports:", {SLOTS[key]: len(value) for key, value in slots.items()})
-    # The sheet merges submissions across attempts. Missing backup slots alone
-    # should not cause a noisy alert when all stores were already captured.
-    if not missing:
-        if absent:
-            print(f"Some scheduled slots lacked reports ({', '.join(absent)}), but all stores were captured.")
-        print("Overnight scraper healthy; no Google Chat alert")
+    if success:
+        print("At least one completed full-store scrape; no alert.", flush=True)
         return
 
-    lines = [
-        f"🚨 Overnight Amazon scraper alert — {day.strftime('%d %b %Y')}",
-        f"Verified submissions: {len(expected) - len(missing)}/{len(expected)} stores",
-    ]
-    for cron, label in SLOTS.items():
-        runs = slots[cron]
-        if not runs:
-            lines.append(f"{label}: no verifiable scheduled run by the morning check")
-        else:
-            results = ", ".join(f"#{run['run_number']} {run.get('conclusion') or run.get('status')}" for run, _ in runs)
-            lines.append(f"{label}: {results}")
-    if not any(slots.values()):
-        lines.append("No scheduled scraper run produced a verifiable report.")
-    if missing:
-        store_list = ", ".join(expected[key] for key in missing[:20])
-        if len(missing) > 20:
-            store_list += f" (+{len(missing) - 20} more)"
-        lines.append(f"No successful form submission recorded for: {store_list}")
-    lines.append(f"See: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/workflows/run-scraper.yml")
-    alert("\n".join(lines))
+    summary = "No automatically scheduled scraper job has completed successfully."
+    if not results:
+        summary = "No automatically scheduled scraper run has appeared."
+    statuses = ", ".join(
+        f"#{r['run_number']}: {r['conclusion'] or r['status'] or 'unknown'}"
+        for r in results
+    ) or "No scheduled scrape runs recorded"
+    notify(
+        f"🚨 Overnight Amazon scraper alert — {day.strftime('%d %b %Y')}\n"
+        f"{summary}\n"
+        f"Scheduled job status: {statuses}\n"
+        f"Please check the data before using the morning update.\n"
+        f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/workflows/run-scraper.yml"
+    )
 
 
 def main():
     try:
         audit()
-    except Exception as exc:
-        print(f"Monitoring error: {type(exc).__name__}: {exc}", file=sys.stderr)
+    except Exception as error:
+        print(f"Monitoring failed: {type(error).__name__}: {error}", file=sys.stderr)
         try:
-            alert(
-                f"🚨 Overnight scraper monitoring couldn't verify today's runs: "
-                f"{type(exc).__name__}: {exc}\n"
+            notify(
+                "🚨 Overnight scraper monitoring error — could not check scheduled jobs.\n"
+                f"{type(error).__name__}: {error}\n"
                 f"https://github.com/{os.environ.get('GITHUB_REPOSITORY', 'Daave2/amazon-scraper')}/actions"
             )
         finally:
