@@ -1,22 +1,40 @@
 name: Run Playwright Scraper
+# Distinct run names let the daily gate exclude the morning monitor.
+run-name: ${{ github.event_name == 'workflow_dispatch' && 'Manual scraper' || github.event.schedule == '30 5 * * *' && 'Morning monitor' || 'Scheduled scraper' }}
 
-# Primary, backup and final safety-net scrapes use fixed UTC times.
-# All scrape slots fall between 01:17 and 04:47 UK time throughout GMT/BST.
-# The 05:30 UTC monitor verifies the combined store submissions.
+# Six half-hourly UTC opportunities; only the first TWO actual scheduled
+# scraper runs per UK day perform a full scrape. Manual runs are unrestricted.
+# The 05:30 UTC monitor checks combined store submissions.
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 1 * * *'   # Primary: 01:17 GMT / 02:17 BST
-    - cron: '37 2 * * *'   # Backup: 02:37 GMT / 03:37 BST
-    - cron: '47 3 * * *'   # Final fallback: 03:47 GMT / 04:47 BST
-    - cron: '30 5 * * *'   # Monitor: 05:30 GMT / 06:30 BST
+    - cron: '17,47 1-3 * * *' # 01:17, 01:47, 02:17, 02:47, 03:17, 03:47 UTC
+    - cron: '30 5 * * *'     # Monitor: 05:30 GMT / 06:30 BST
 
 env:
   PYTHON_VERSION: '3.11'
 
 jobs:
-  scrape-and-submit:
+  scrape-gate:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule != '30 5 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run_scrape: ${{ steps.check.outputs.run_scrape }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Limit scheduled full scrapes to first two per UK day
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/limit_daily_scrapes.py
+
+  scrape-and-submit:
+    needs: scrape-gate
+    if: needs.scrape-gate.outputs.run_scrape == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
