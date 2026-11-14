@@ -1,7 +1,8 @@
-"""Allow a maximum of two scheduled full scraper jobs per UK calendar day.
+"""Allow at most two full scheduled scraper jobs per UK calendar day.
 
-Manual workflow_dispatch runs do not count towards the cap.
-Scheduled monitoring runs are excluded using their distinct run-name.
+Evening UTC schedules are advance trigger opportunities for GitHub delays.
+If they arrive before 01:00 UK local time, skip without using either scrape slot.
+Manual workflow_dispatch runs are unrestricted; morning monitors are excluded.
 """
 import json
 import os
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 UK = ZoneInfo("Europe/London")
 SCRAPER_RUN_NAME = "Scheduled scraper"
 MAX_DAILY_RUNS = 2
+EARLIEST_SCRAPE_HOUR_UK = 1
 
 
 def scheduled_runs():
@@ -47,9 +49,19 @@ def scheduled_runs():
     return all_runs
 
 
-def uk_run_date(run):
+def uk_run_time(run):
+    """Timestamp when GitHub created the scheduled workflow run, in UK time."""
     created = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-    return created.astimezone(UK).date()
+    return created.astimezone(UK)
+
+
+def is_eligible(run, day):
+    when = uk_run_time(run)
+    return (
+        run.get("display_title") == SCRAPER_RUN_NAME
+        and when.date() == day
+        and when.hour >= EARLIEST_SCRAPE_HOUR_UK
+    )
 
 
 def set_gate(should_run):
@@ -75,13 +87,18 @@ def main():
     if current.get("display_title") != SCRAPER_RUN_NAME:
         raise RuntimeError("Current run is not labelled as a scheduled scraper run")
 
-    day = uk_run_date(current)
+    current_time = uk_run_time(current)
+    day = current_time.date()
+    if current_time.hour < EARLIEST_SCRAPE_HOUR_UK:
+        print(
+            f"Scheduled run {run_id} arrived at {current_time.isoformat()}; "
+            "before 01:00 UK. Skipping without consuming a daily scrape slot."
+        )
+        set_gate(False)
+        return
+
     candidates = sorted(
-        (
-            run for run in runs
-            if run.get("display_title") == SCRAPER_RUN_NAME
-            and uk_run_date(run) == day
-        ),
+        (run for run in runs if is_eligible(run, day)),
         key=lambda run: (run["created_at"], run["id"]),
     )
     first_two_ids = [run["id"] for run in candidates[:MAX_DAILY_RUNS]]
