@@ -2,17 +2,16 @@ name: Run Playwright Scraper
 # Distinct run names let the daily gate exclude the morning monitor.
 run-name: ${{ github.event_name == 'workflow_dispatch' && 'Manual scraper' || github.event.schedule == '30 5 * * *' && 'Morning monitor' || 'Scheduled scraper' }}
 
-# Seven advance UTC trigger opportunities (17:17-23:17), plus six overnight.
-# Delayed evening events can arrive in the UK overnight scraping window.
-# Events arriving BEFORE 01:00 UK skip; the first two eligible scheduled runs
-# each UK day perform full scrapes. Manual runs are unrestricted.
-# The 05:30 UTC monitor checks completed scheduled scraper jobs.
+# Like the original working configuration: one UTC schedule opportunity per hour.
+# The gate checks the actual UK time, allowing full scrapes only 01:00–05:29.
+# At most the first two eligible scheduled runs per UK day scrape.
+# Extra scheduled runs are lightweight; manual runs remain unrestricted.
+# A separate 05:30 UTC schedule checks completed scraper jobs.
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 17-23 * * *' # Advance triggers hourly, 17:17-23:17 UTC
-    - cron: '17,47 1-3 * * *' # Overnight triggers 01:17-03:47 UTC
-    - cron: '30 5 * * *'     # Monitor: 05:30 GMT / 06:30 BST
+    - cron: '15 * * * *'    # Hourly scheduler check (same as original setup)
+    - cron: '30 5 * * *'    # Monitor: 05:30 GMT / 06:30 BST
 
 env:
   PYTHON_VERSION: '3.11'
@@ -29,7 +28,7 @@ jobs:
       run_scrape: ${{ steps.check.outputs.run_scrape }}
     steps:
       - uses: actions/checkout@v4
-      - name: Ignore pre-01:00 UK events and cap full scrapes at two per UK day
+      - name: Check UK overnight time and cap full scrapes at two per UK day
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
