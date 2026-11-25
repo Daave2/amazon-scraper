@@ -1,49 +1,18 @@
-name: Run Playwright Scraper
-# Distinct run names let the daily gate exclude the morning monitor.
-run-name: ${{ github.event_name == 'workflow_dispatch' && 'Manual scraper' || github.event.schedule == '30 5 * * *' && 'Morning monitor' || 'Scheduled scraper' }}
-
-# Like the original working configuration: one UTC schedule opportunity per hour.
-# The gate checks the actual UK time, allowing full scrapes only 01:00–05:29.
-# At most the first two eligible scheduled runs per UK day scrape.
-# Extra scheduled runs are lightweight; manual runs remain unrestricted.
-# A separate 05:30 UTC schedule checks completed scraper jobs.
+name: Scraper dry run
+run-name: Dry run with local form receiver
 on:
+  push:
+    branches: [test/overnight-dry-run-20261125]
   workflow_dispatch:
-  schedule:
-    - cron: '15 * * * *'    # Hourly scheduler check (same as original setup)
-    - cron: '30 5 * * *'    # Monitor: 05:30 GMT / 06:30 BST
-
+permissions:
+  contents: read
+  actions: read
 env:
   PYTHON_VERSION: '3.11'
-
 jobs:
-  scrape-gate:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule != '30 5 * * *'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      run_scrape: ${{ steps.check.outputs.run_scrape }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check UK overnight time and cap full scrapes at two per UK day
-        id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python .github/scripts/limit_daily_scrapes.py
-
-  scrape-and-submit:
-    needs: scrape-gate
-    if: needs.scrape-gate.outputs.run_scrape == 'true'
+  dry-run:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    concurrency:
-      group: overnight-scraper-${{ github.ref }}
-      cancel-in-progress: false
-      queue: max
-
     steps:
       - uses: actions/checkout@v4
 
@@ -74,13 +43,13 @@ jobs:
 
       - name: Build runtime config from Secrets
         env:
-          FORM_URL: ${{ secrets.FORM_URL }}
+          FORM_URL: http://127.0.0.1:8765/formResponse
           LOGIN_URL: ${{ secrets.LOGIN_URL }}
-          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          SECRET_KEY: ""
           LOGIN_EMAIL: ${{ secrets.LOGIN_EMAIL }}
           LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
           OTP_SECRET_KEY: ${{ secrets.OTP_SECRET_KEY }}
-          CHAT_WEBHOOK_URL: ${{ secrets.CHAT_WEBHOOK_URL }}
+          CHAT_WEBHOOK_URL: ""
         run: |
           python - <<'PY'
           import json
@@ -116,7 +85,7 @@ jobs:
         shell: bash
         run: |
           artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=auth-state&per_page=100")
-          candidate=$(jq -r --arg branch "$GITHUB_REF_NAME" --argjson repo "$REPOSITORY_ID" '
+          candidate=$(jq -r --arg branch "main" --argjson repo "$REPOSITORY_ID" '
             [.artifacts[] | select(.name == "auth-state" and .expired == false
               and .workflow_run.head_repository_id == $repo and .workflow_run.head_branch == $branch)]
             | max_by(.created_at, .id) | select(. != null) | [.id, .workflow_run.id] | @tsv
@@ -139,83 +108,19 @@ jobs:
           jq -e '(.cookies | type == "array" and length > 0)' "$temp_dir/state.json" >/dev/null
           mv "$temp_dir/state.json" state.json
 
-      - name: Run scraper and automatically retry incomplete submissions
-        run: python .github/scripts/run_with_retry.py
-
-      - name: Write submission status for morning monitoring
-        if: always()
-        env:
-          TRIGGER_EVENT: ${{ github.event_name }}
-          TRIGGER_SCHEDULE: ${{ github.event.schedule }}
+      - name: Read live store pages with a local dummy form
+        shell: bash
         run: |
-          python - <<'PY'
-          import json
-          import os
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          names = set()
-          path = 'output/submissions.jsonl'
-          if os.path.exists(path):
-              with open(path, encoding='utf-8') as file:
-                  for line in file:
-                      try:
-                          record = json.loads(line)
-                          if record.get('store'):
-                              names.add(record['store'].strip())
-                      except (ValueError, AttributeError):
-                          continue
-
-          os.makedirs('output', exist_ok=True)
-          with open('output/scraper-status.json', 'w', encoding='utf-8') as file:
-              json.dump({
-                  'event': os.environ.get('TRIGGER_EVENT', ''),
-                  'scheduled_cron': os.environ.get('TRIGGER_SCHEDULE', ''),
-                  'uk_date': datetime.now(ZoneInfo('Europe/London')).date().isoformat(),
-                  'submitted_stores': sorted(names)
-              }, file, indent=2)
-          print(f'Submission report: {len(names)} distinct stores')
-          PY
-
-      - name: Upload scraper output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scraper-output-${{ github.run_id }}
-          path: |
-            output/
-            app.log
-            state.json
-          retention-days: 7
-
-      - name: Upload scraper status for monitoring
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scraper-status-${{ github.run_id }}
-          path: output/scraper-status.json
-          retention-days: 7
-
-      - name: Upload auth state
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: auth-state
-          path: state.json
-          retention-days: 7
-          overwrite: true
-
-  overnight-monitor:
-    if: github.event_name == 'schedule' && github.event.schedule == '30 5 * * *'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify overnight submissions; alert Google Chat only on problems
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CHAT_WEBHOOK_URL: ${{ secrets.CHAT_WEBHOOK_URL }}
-        run: python .github/scripts/check_overnight.py
+          python .github/scripts/dummy_form.py &
+          receiver=$!
+          trap 'kill "$receiver" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl -fsS http://127.0.0.1:8765/ready >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8765/ready >/dev/null
+          status=0
+          python .github/scripts/run_with_retry.py > "$RUNNER_TEMP/dry-run.log" 2>&1 || status=$?
+          grep -E '^Expected stores:|^Attempt [0-9]+: exit code=|^Missing stores:|^All expected stores' "$RUNNER_TEMP/dry-run.log" >> "$GITHUB_STEP_SUMMARY" || true
+          cat "$GITHUB_STEP_SUMMARY"
+          exit "$status"

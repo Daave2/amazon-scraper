@@ -87,7 +87,7 @@ except json.JSONDecodeError:
 
 DEBUG_MODE      = config.get('debug', False)
 LOGIN_URL       = config['login_url']
-CHAT_WEBHOOK_URL = config.get('chat_webhook_url')
+CHAT_WEBHOOK_URL = None
 CHAT_BATCH_SIZE  = config.get('chat_batch_size', 100)
 STORE_PREFIX_RE  = re.compile(r"^morrisons\s*-\s*", re.I)
 
@@ -102,7 +102,7 @@ def sanitize_store_name(name: str) -> str:
     """Trim standard prefix from store names for chat display."""
     return STORE_PREFIX_RE.sub("", name).strip()
 
-FORM_POST_URL = "https://docs.google.com/forms/d/e/1FAIpQLScg_jnxbuJsPs4KejUaVuu-HfMQKA3vSXZkWaYh-P_lbjE56A/formResponse"
+FORM_POST_URL = "http://127.0.0.1:8765/formResponse"
 FIELD_MAP = {
     'store':          'entry.117918617',
     'orders':         'entry.128719511',
