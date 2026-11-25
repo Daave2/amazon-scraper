@@ -108,13 +108,36 @@ jobs:
           PY
 
       - name: Download auth state from previous run
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: run-scraper.yml
-          name: auth-state
-          path: .
-          if_no_artifact_found: warn
-          search_artifacts: true
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        shell: bash
+        run: |
+          artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=auth-state&per_page=100")
+          candidate=$(jq -r --arg branch "$GITHUB_REF_NAME" --argjson repo "$REPOSITORY_ID" '
+            [.artifacts[] | select(.name == "auth-state" and .expired == false
+              and .workflow_run.head_repository_id == $repo and .workflow_run.head_branch == $branch)]
+            | max_by(.created_at, .id) | select(. != null) | [.id, .workflow_run.id] | @tsv
+          ' <<< "$artifacts")
+          if [[ -z "$candidate" ]]; then
+            echo "No saved session available. The scraper will log in."
+            exit 0
+          fi
+          read -r artifact_id run_id <<< "$candidate"
+          source_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
+          if ! jq -e '.path == ".github/workflows/run-scraper.yml" and .conclusion == "success"
+            and (.event == "schedule" or .event == "workflow_dispatch")' <<< "$source_run" >/dev/null; then
+            echo "Latest saved session is not from a successful scraper run. The scraper will log in."
+            exit 0
+          fi
+          temp_dir=$(mktemp -d)
+          trap 'rm -rf -- "$temp_dir"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$temp_dir/state.zip"
+          unzip -p "$temp_dir/state.zip" state.json > "$temp_dir/state.json"
+          jq -e '(.cookies | type == "array" and length > 0)' "$temp_dir/state.json" >/dev/null
+          mv "$temp_dir/state.json" state.json
 
       - name: Run scraper and automatically retry incomplete submissions
         run: python .github/scripts/run_with_retry.py

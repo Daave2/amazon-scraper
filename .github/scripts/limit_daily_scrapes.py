@@ -7,9 +7,10 @@ Manual workflow_dispatch runs remain unrestricted.
 """
 import json
 import os
+import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, time as clock_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 UK = ZoneInfo("Europe/London")
@@ -27,14 +28,18 @@ def in_overnight_window(when):
     )
 
 
-def scheduled_runs():
+def scheduled_runs(day):
     repository = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GH_TOKEN"]
     all_runs = []
+    midnight = datetime.combine(day, clock_time.min, tzinfo=UK)
+    next_midnight = midnight + timedelta(days=1)
+    start = midnight.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (next_midnight - timedelta(seconds=1)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for page in range(1, 6):
         params = urllib.parse.urlencode(
-            {"event": "schedule", "per_page": 100, "page": page}
+            {"event": "schedule", "created": f"{start}..{end}", "per_page": 100, "page": page}
         )
         url = (
             f"https://api.github.com/repos/{repository}/actions/"
@@ -89,9 +94,20 @@ def main():
     if os.environ["GITHUB_EVENT_NAME"] != "schedule":
         raise RuntimeError("Unexpected workflow trigger")
 
+    now = datetime.now(UK)
+    if not in_overnight_window(now):
+        print(f"Outside 01:00–05:29 UK at {now.isoformat()}. Skipping.")
+        set_gate(False)
+        return
+
     run_id = int(os.environ["GITHUB_RUN_ID"])
-    runs = scheduled_runs()
-    current = next((run for run in runs if run["id"] == run_id), None)
+    for attempt in range(3):
+        runs = scheduled_runs(now.date())
+        current = next((run for run in runs if run["id"] == run_id), None)
+        if current is not None:
+            break
+        if attempt < 2:
+            time.sleep(5)
     if current is None:
         raise RuntimeError("Current run not found in GitHub API; refusing an uncounted scrape")
     if current.get("display_title") != SCRAPER_RUN_NAME:
